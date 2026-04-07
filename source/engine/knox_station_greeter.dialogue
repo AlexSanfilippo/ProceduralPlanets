@@ -1,0 +1,36 @@
+menu: root
+    option:
+        prompt: What is this place?
+        response: This is Knox Station, a bustling hub of commerce and travel located at the crossroads of several major trade routes. Here, merchants from all over the galaxy come to trade goods, share news, and seek adventure. The station is known for its diverse population, vibrant markets, and state-of-the-art facilities. Whether you're looking for rare artifacts, cutting-edge technology, or just a place to rest and refuel, Knox Station has something for everyone.
+    option:
+        prompt: Who runs this station?
+        response: Knox Station is managed by the Knox Station Authority, a coalition of influential merchants and traders who oversee the station's operations. The authority is led by Director Liora Vex, a shrewd and charismatic leader known for her ability to navigate the complex politics of interstellar commerce. Under her leadership, Knox Station has flourished into one of the most important trade hubs in the galaxy.
+    option:
+        prompt: Who are you?
+        response: I am Arin, the station greeter here at Knox Station.
+        next_menu: arin
+        action: met_knox_greeter_intro
+    option:
+        prompt: What does the station greeter do, exactly?
+        response: As the station greeter, my primary role is to welcome visitors.
+        condition: met_knox_greeter_intro
+    option:
+        prompt: Goodbye.
+        response: Safe travels, and enjoy your time at Knox Station!
+        next_menu: EXIT
+
+
+menu: arin
+    option:
+        prompt: Tell me about yourself.
+        response: I've been working as the station greeter for the past five years. I love meeting new people and helping them get acclimated to life on Knox Station. It's a fascinating place with a rich history, and I'm proud to be a part of it.
+    option:
+        prompt: Any tips for newcomers?
+        response: Absolutely! First, make sure to explore the markets – you can find some incredible deals and unique items. Also, don't hesitate to strike up conversations with other travelers; you never know what kind of opportunities or friendships might arise. Lastly, always keep an eye on your belongings; with so many people around, it's important to stay vigilant.
+    option:
+        prompt: Where can I find more information about the station?
+        response: You can visit the Information Center located near the main docking bay. They have brochures, maps, and staff members who can assist you with any questions you might have about Knox Station and its services.
+    option:
+        prompt: I'd like to ask you about something else
+        response: Of course!
+        next_menu: root
