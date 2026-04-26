@@ -46,6 +46,7 @@ logger.setLevel(logging.DEBUG)
 WIDTH, HEIGHT = 1728, 972
 WINDOW_POSITION = (40, 40)
 WRITE_TO_GIF = False
+DRAW_GUI = True
 lastX, lastY = WIDTH / 2, HEIGHT / 2
 
 #key-input globals
@@ -76,7 +77,9 @@ glfw.set_window_pos(window, *WINDOW_POSITION)
 def key_input_clb(window, key, scancode, action, mode):
     global left, right, forward, backward, make_new_surface, player_left, player_right, player_forward, \
         player_backward, yaw_counterclockwise, yaw_clockwise, \
-        pause, up, down, wrote_to_gif, switch_view_mode, test_subdivide
+        pause, up, down, wrote_to_gif, switch_view_mode, test_subdivide, DRAW_GUI, WRITE_TO_GIF
+
+
 
     if key == glfw.KEY_ESCAPE and action == glfw.PRESS:
         glfw.set_window_should_close(window, True)
@@ -124,6 +127,14 @@ def key_input_clb(window, key, scancode, action, mode):
         capture_screenshot(width=WIDTH, height=HEIGHT)
     if key == glfw.KEY_Y and action == glfw.PRESS:
         test_subdivide = True
+    if key == glfw.KEY_H and action == glfw.PRESS:
+        demo_triangle_subdivided.subdivide()
+    if key == glfw.KEY_F10 and action == glfw.PRESS:
+        DRAW_GUI = not DRAW_GUI
+        print(f"GUI drawing: {'ON' if DRAW_GUI else 'OFF'}")
+    if key == glfw.KEY_F11 and action == glfw.PRESS:
+        WRITE_TO_GIF = not WRITE_TO_GIF
+        print(f"Write to GIF: {'ON' if WRITE_TO_GIF else 'OFF'}")
 
 
 def mouse_look_clb(window, xpos, ypos):
@@ -319,7 +330,7 @@ planet = PlanetMesh(
     )
 
 def regenerate_planet():
-    global planet, planet_settings
+    global planet
     planet.cleanup()
     planet = PlanetMesh(
         shader_program=shader_point_light,
@@ -356,7 +367,7 @@ gui.add_text_button(
     atlas_size=2,
     atlas_coordinate=(0,0),
     click_function=change_planet_setting,
-    delta = +0.5,
+    delta = +10.5,
     setting = "displacement_amplitude",
 )
 gui.add_text_button(
@@ -371,7 +382,7 @@ gui.add_text_button(
     atlas_size=2,
     atlas_coordinate=(0,0),
     click_function=change_planet_setting,
-    delta = -0.5,
+    delta = -10.5,
     setting = "displacement_amplitude",
 )
 
@@ -505,7 +516,7 @@ gui.add_text_button(
     atlas_size=2,
     atlas_coordinate=(0,0),
     click_function=change_planet_setting,
-    delta = +0.25,
+    delta = +10.25,
     setting = "amplitude",
 )
 
@@ -520,7 +531,7 @@ gui.add_text_button(
     atlas_size=2,
     atlas_coordinate=(0,0),
     click_function=change_planet_setting,
-    delta = -0.25,
+    delta = -10.25,
     setting = "amplitude",
 )
 
@@ -687,6 +698,40 @@ def update_lights(shader):
 projection = pyrr.matrix44.create_perspective_projection_matrix(45, WIDTH / HEIGHT, 0.1, 2000)
 
 shaders_lighting = [planet.shader_program]
+
+"""Demo Meshes - spread along X axis"""
+demo_triangle = TriangleIndexed(
+    shader_program=shader_program_pos_normal,
+    position=vec3(-400.0, 0.0, 0.0),
+    scale=10.0,
+    projection=projection,
+)
+demo_cube = Cube(
+    shader_program=shader_program_pos_normal,
+    position=vec3(-350.0, 0.0, 0.0),
+    scale=10.0,
+    projection=projection,
+)
+demo_triangle_subdivided = TriangleSubdivided(
+    shader_program=shader_program_pos_normal,
+    position=vec3(-300.0, 0.0, 0.0),
+    scale=10.0,
+    projection=projection,
+)
+demo_icosphere_0 = IcosphereSubdivided(
+    shader_program=shader_program_pos_normal,
+    face_subdivisions=0,
+    position=vec3(-250.0, 0.0, 0.0),
+    scale=10.0,
+    projection=projection,
+)
+demo_icosphere = IcosphereSubdivided(
+    shader_program=shader_program_pos_normal,
+    face_subdivisions=2,
+    position=vec3(-200.0, 0.0, 0.0),
+    scale=10.0,
+    projection=projection,
+)
 
 
 def subdivide_method(v0, v1, v2, level):
@@ -865,6 +910,11 @@ while not glfw.window_should_close(window):
 
     view = active_camera.get_view_matrix()
 
+    demo_triangle.draw(view_matrix=view)
+    demo_cube.draw(view_matrix=view)
+    demo_triangle_subdivided.draw(view_matrix=view)
+    demo_icosphere_0.draw(view_matrix=view)
+    demo_icosphere.draw(view_matrix=view)
     planet.draw(view_matrix=view)
 
 
@@ -897,7 +947,7 @@ while not glfw.window_should_close(window):
     for light in light_cubes:
         light.draw(view=view)
 
-    if use_sim_cam:
+    if use_sim_cam and DRAW_GUI:
         gui.draw()
 
     if WRITE_TO_GIF:

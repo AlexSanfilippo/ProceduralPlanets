@@ -211,6 +211,7 @@ class Cube(TriangleIndexed):
         # indices filled inside generate_vertices path or here after vertices built
         # generate_vertices returns interleaved array; we also compute indices below
         # (keeps API similar to TriangleIndexed)
+        self.model_matrix = self.get_model_matrix()
         self.setup_buffers()
 
     def generate_vertices(self, position, scale):
@@ -582,10 +583,11 @@ class IcosphereSubdivided(TriangleIndexed):
         normals_arr = np.vstack(normals).astype(np.float32)
         interleaved = np.hstack((positions_arr, normals_arr)).flatten().astype(np.float32)
 
+        # Build indices array from the subdivided triangles
         self.indices = np.array(indices, dtype=np.uint32)
         self.index_count = int(self.indices.size)
 
-        return interleaved
+        return interleaved.astype(np.float32)
 
     def update_subdivisions_by_player(self, player_position, min_level=0, max_level=None, regenerate=True):
         """
@@ -760,6 +762,7 @@ class IcosphereSubdivided(TriangleIndexed):
                 next_index += 1
 
         if len(positions) == 0:
+            # fallback to a single face if something went wrong
             positions = [np.array([0.0, 0.0, 0.0], dtype=np.float32)]
             normals = [np.array([0.0, 0.0, 1.0], dtype=np.float32)]
             indices = [0]
@@ -768,21 +771,15 @@ class IcosphereSubdivided(TriangleIndexed):
         normals_arr = np.vstack(normals).astype(np.float32)
         interleaved = np.hstack((positions_arr, normals_arr)).flatten().astype(np.float32)
 
-        self.vertices = interleaved
-        self.indices = np.array(indices, dtype=np.uint32)
+        # Build indices array (faces are triangles)
+        idx_list = []
+        for tri in faces:
+            idx_list.extend([tri[0], tri[1], tri[2]])
+
+        self.indices = np.array(idx_list, dtype=np.uint32)
         self.index_count = int(self.indices.size)
 
-        if regenerate:
-            try:
-                if hasattr(self, "VBO"):
-                    glDeleteBuffers(1, [self.VBO])
-                if hasattr(self, "EBO"):
-                    glDeleteBuffers(1, [self.EBO])
-                if hasattr(self, "VAO"):
-                    glDeleteVertexArrays(1, [self.VAO])
-            except Exception:
-                pass
-            self.setup_buffers()
+        return interleaved.astype(np.float32)
 
 
 class PlanetMesh(IcosphereSubdivided):
@@ -1026,6 +1023,7 @@ class PlanetMesh(IcosphereSubdivided):
             next_index += 1
 
         if len(positions) == 0:
+            # fallback to a single face if something went wrong
             positions = [np.array([0.0, 0.0, 0.0], dtype=np.float32)]
             normals = [np.array([0.0, 0.0, 1.0], dtype=np.float32)]
             indices = [0]
@@ -1068,6 +1066,7 @@ class PlanetMeshGPU(IcosphereSubdivided):
                  scale=1.0, projection=None,
                  planet_type="Earth", octaves=5, lacunarity=1.0, gain=1.0,amplitude=1.0, frequency=1.0, seed=1):
         self.type = planet_type  # or "Moon", "Mars", etc. for different noise adjustments
+
 
         super().__init__(shader_program, subdivisions, position, scale, projection)
         glUseProgram(self.shader_program)
@@ -1147,15 +1146,6 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
             0: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=4, min_dot=0.0, scale=None, position=None),
             1: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=5, min_dot=0.9, scale=None, position=None),
             2: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=6, min_dot=0.9, scale=None, position=None),
-            # 3: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=4, min_dot=0.9, scale=None, position=None),
-            # 4: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=5, min_dot=0.9, scale=None, position=None),
-            # 5: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=6, min_dot=0.9, scale=None, position=None),
-            # 6: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=7, min_dot=0.9, scale=None, position=None),
-            # 7: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=8, min_dot=0.9, scale=None, position=None),
-            # 8: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=9, min_dot=0.9, scale=None, position=None),
-            # 9: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=10, min_dot=0.9, scale=None, position=None),
-            # 10: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=11, min_dot=0.9, scale=None, position=None),
-            # 11: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=12, min_dot=0.9, scale=None, position=None),
             3: self.generate_vertices_directional(direction=(1.0, 0.0, 0.0), max_subdivisions=12, min_dot=0.9, scale=None, position=None),
         }
         self.vertices, self.indices, self.index_count = self.lod_meshes[0]
@@ -1189,18 +1179,10 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
         """
         Build an icosphere starting with 0 subdivisions and recursively subdivide
         triangles whose face normal aligns with `direction` above `min_dot`.
-        - direction: tuple-like, the target direction (default up).
-        - max_subdivisions: maximum recursion depth.
-        - min_dot: minimum dot product between triangle normal and direction to trigger subdivision.
-        - scale: optional override for sphere radius (defaults to self.scale).
-        - position: optional override for sphere position (defaults to self.position).
-        Returns interleaved positions+normals (flattened float32) and sets self.indices/self.index_count.
         """
-        # use provided scale/position or fall back to instance values
         s = float(scale) if scale is not None else float(getattr(self, "scale", 1.0))
         pos = np.array([position.x, position.y, position.z], dtype=np.float32) if position is not None else np.array([self.position.x, self.position.y, self.position.z], dtype=np.float32)
 
-        # normalize direction
         dir_v = np.array(direction, dtype=np.float64)
         dnorm = np.linalg.norm(dir_v)
         if dnorm == 0.0:
@@ -1208,23 +1190,11 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
         else:
             dir_v = dir_v / dnorm
 
-        # base icosahedron (same ordering used elsewhere)
         t = (1.0 + np.sqrt(5.0)) / 2.0
         base_verts = [
-            (-1,  t,  0),
-            ( 1,  t,  0),
-            (-1, -t,  0),
-            ( 1, -t,  0),
-
-            ( 0, -1,  t),
-            ( 0,  1,  t),
-            ( 0, -1, -t),
-            ( 0,  1, -t),
-
-            ( t,  0, -1),
-            ( t,  0,  1),
-            (-t,  0, -1),
-            (-t,  0,  1),
+            (-1,  t,  0), ( 1,  t,  0), (-1, -t,  0), ( 1, -t,  0),
+            ( 0, -1,  t), ( 0,  1,  t), ( 0, -1, -t), ( 0,  1, -t),
+            ( t,  0, -1), ( t,  0,  1), (-t,  0, -1), (-t,  0,  1),
         ]
         vertices_unit = [np.array(v, dtype=np.float64) / np.linalg.norm(v) for v in base_verts]
 
@@ -1235,44 +1205,16 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
             (4, 9, 5), (2, 4, 11), (6, 2, 10), (8, 6, 7), (9, 8, 1),
         ]
 
-        # recursive subdivision based on alignment with dir_v
         def subdivide_triangle(v0, v1, v2, level):
-            # compute face normal (average of unit vertices) and normalize
             fn = v0 + v1 + v2
             fn_norm = fn / np.linalg.norm(fn)
             dot = float(np.dot(fn_norm, dir_v))
 
             level_to_min_dot_map = {
-                # 0: 0,
-                # 1: 0.25,
-                # 2: 0.5,
-                # 3: 0.75,
-                # 4: 0.9,
-                # 5: 0.95,
-                # 6: 0.98,
-                # 7: 0.99,
-                # 8: 0.995,
-                # 9: 0.999,
-                # 10: 0.9995,
-                # 11: 0.9999,
-                # 12: 0.9999,
-                # 13: 0.9999,
-                0: -1.0,
-                1: -1.0,
-                2: -1.0,
-                3: -1.0,
-                4: -1.0,
-                5: 0.25,
-                6: 0.6,
-                7: 0.85,
-                8: 0.95,
-                9: 0.99,
-                10: 0.999,
-                11: 0.999,
-                12: 0.999,
-                13: 0.999,
+                0: -1.0, 1: -1.0, 2: -1.0, 3: -1.0, 4: -1.0,
+                5: 0.25, 6: 0.6, 7: 0.85, 8: 0.95, 9: 0.99,
+                10: 0.999, 11: 0.999, 12: 0.999, 13: 0.999,
             }
-            # decide to subdivide if aligned and not exceeded max depth
             if level < max_subdivisions and dot >= level_to_min_dot_map[level]:
                 a = v0 + v1
                 a = a / np.linalg.norm(a)
@@ -1296,7 +1238,6 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
             v2 = vertices_unit[ic]
             final_tris.extend(subdivide_triangle(v0, v1, v2, 0))
 
-        # build vertex lists (duplicate vertices per triangle as done in other methods)
         positions = []
         normals = []
         indices = []
@@ -1304,14 +1245,15 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
 
         for (v0, v1, v2) in final_tris:
             for v in (v0, v1, v2):
-                n = np.array(v, dtype=np.float32)               # unit normal
-                p = n * s + pos                                # scaled position + offset
+                n = np.array(v, dtype=np.float32)
+                p = n * s + pos
                 positions.append(p)
                 normals.append(n)
                 indices.append(next_index)
                 next_index += 1
 
         if len(positions) == 0:
+            # fallback to a single face if something went wrong
             positions = [np.array([0.0, 0.0, 0.0], dtype=np.float32)]
             normals = [np.array([0.0, 0.0, 1.0], dtype=np.float32)]
             indices = [0]
@@ -1320,17 +1262,15 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
         normals_arr = np.vstack(normals).astype(np.float32)
         interleaved = np.hstack((positions_arr, normals_arr)).flatten().astype(np.float32)
 
-        # set indices on self and return interleaved data
         indices = np.array(indices, dtype=np.uint32)
         index_count = int(indices.size)
         return interleaved, indices, index_count
 
     def _get_axis_of_rotation(self, position):
-        """Given a position, compute the axis of rotation.  This will be the cross product of the current rotation direction and the vector from the planet center to the position."""
         to_position = vec3(position.x - self.position.x, position.y - self.position.y, position.z - self.position.z)
         to_position_norm = np.linalg.norm([to_position.x, to_position.y, to_position.z])
         if to_position_norm == 0.0:
-            return vec3(0.0, 1.0, 0.0)  # default axis if position is exactly at planet center
+            return vec3(0.0, 1.0, 0.0)
         to_position_normalized = vec3(to_position.x / to_position_norm, to_position.y / to_position_norm, to_position.z / to_position_norm)
         axis = vec3(
             self.default_rotation_direction.y * to_position_normalized.z - self.default_rotation_direction.z * to_position_normalized.y,
@@ -1339,23 +1279,20 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
         )
         axis_norm = np.linalg.norm([axis.x, axis.y, axis.z])
         if axis_norm == 0.0:
-            return vec3(0.0, 1.0, 0.0)  # default axis if current rotation direction is parallel to vector to position
+            return vec3(0.0, 1.0, 0.0)
         return vec3(axis.x / axis_norm, axis.y / axis_norm, axis.z / axis_norm)
 
     def _update_rotation_direction(self, position):
-        """Update the current rotation direction to point towards the given position."""
         to_position = vec3(position.x - self.position.x, position.y - self.position.y, position.z - self.position.z)
         to_position_norm = np.linalg.norm([to_position.x, to_position.y, to_position.z])
         if to_position_norm == 0.0:
-            return  # do not update if position is exactly at planet center
+            return
         self.current_rotation_direction = vec3(to_position.x / to_position_norm, to_position.y / to_position_norm, to_position.z / to_position_norm)
 
     def _rotate_along_current_axis(self, angle_degrees):
-        """Rotate the planet along the current axis of rotation by the given angle in degrees."""
         self.rotate_planet(self.axis_vec, angle_degrees)
 
     def _angle_between_vectors(self, v1, v2):
-        """Compute the angle in degrees between two vectors."""
         v1_norm = np.linalg.norm([v1.x, v1.y, v1.z])
         v2_norm = np.linalg.norm([v2.x, v2.y, v2.z])
         if v1_norm == 0.0 or v2_norm == 0.0:
@@ -1363,7 +1300,7 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
         v1_normalized = vec3(v1.x / v1_norm, v1.y / v1_norm, v1.z / v1_norm)
         v2_normalized = vec3(v2.x / v2_norm, v2.y / v2_norm, v2.z / v2_norm)
         dot = v1_normalized.x * v2_normalized.x + v1_normalized.y * v2_normalized.y + v1_normalized.z * v2_normalized.z
-        dot_clamped = max(min(dot, 1.0), -1.0)  # clamp for safety against numerical issues
+        dot_clamped = max(min(dot, 1.0), -1.0)
         angle_radians = np.arccos(dot_clamped)
         angle_degrees = np.degrees(angle_radians)
         return angle_degrees
@@ -1375,31 +1312,24 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
         return angle
 
     def rotate_towards_position(self, position):
-        """
-        working
-        """
         self.reset_rotation()
         axis = self._get_axis_of_rotation(position)
         self.axis_vec = axis
         degrees = self._get_degrees_to_rotate(position)
         print(f'{degrees=}')
         self._rotate_along_current_axis(angle_degrees=degrees)
-        # self._update_rotation_direction(position)
-
 
     def draw_lines(self, line_shader_program, view_matrix, camera_position):
-        #create a line between the planet center and current rotation direction for debugging
         center_to_direction = Line(
             shader_program=line_shader_program,
             start=self.position,
             end=self.position + self.current_rotation_direction * self.scale * 1.5,
             color_start=vec3(1.0, 1.0, 1.0),
             color_end=vec3(1.0, 0.0, 1.0),
-                projection=self.projection,
+            projection=self.projection,
         )
         center_to_direction.draw(view_matrix=view_matrix)
 
-        #draw line between planet center and camera position
         center_to_camera = Line(
             shader_program=line_shader_program,
             start=self.position,
@@ -1410,7 +1340,6 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
         )
         center_to_camera.draw(view_matrix=view_matrix)
 
-        #draw line between planet center and axis of rotation
         center_to_axis = Line(
             shader_program=line_shader_program,
             start=self.position,
@@ -1422,18 +1351,12 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
         center_to_axis.draw(view_matrix=view_matrix)
 
     def update_lod(self, target_position):
-        """Update"""
         self.check_for_lod_update(target_position)
         self.check_for_rotation_update(target_position)
 
     def check_for_lod_update(self, target_position):
-        """Checks distance between target_position and planet surface, updates LOD if thresholds are crossed."""
-        #get the point of the planet surface between the target position and the planet center, assuming self.scale is the radius of the planet
         distance_to_surface = self._get_distance_to_surface(target_position)
-        #map between LOD and min/max distance thresholds
-        #each level should be 1/4 its previous
-        lod_thresholds = {0: 2000, 1: 500, 2:125, 3: 32}
-        #for current lod (self.lod) check if distance_to_surface is outside the thresholds for that LOD, if so update LOD
+        lod_thresholds = {0: 4000, 1: 2000, 2:1000, 3: 500}
         if self.lod in lod_thresholds:
             threshold = lod_thresholds[self.lod]
             threshold_lower = lod_thresholds[self.lod - 1] if self.lod - 1 in lod_thresholds else float('inf')
@@ -1449,30 +1372,22 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
         return distance_to_surface
 
     def check_for_rotation_update(self, target_position):
-        """
-        Checks angle between current rotation direction and vector to target position, updates rotation if angle exceeds threshold.
-
-        status: essentially works, but we need to set threshold_degrees to increase sensitivity as target approachs planet
-        """
         if self.lod < 3:
-            return  # only update rotation for higher LODs for now
-
-        #get distance between target position and self.position
+            return
         threshold_degrees = self._get_threshold_degrees_for_distance(
             distance=self._get_distance_to_surface(target_position=target_position)
         )
         to_target = target_position - self.position
         to_target_norm = np.linalg.norm([to_target.x, to_target.y, to_target.z])
         if to_target_norm == 0.0:
-            return  # do not update if target is exactly at planet center
+            return
         to_target_normalized = to_target / to_target_norm
         angle = self._angle_between_vectors(v1=to_target_normalized, v2=self.discrete_rotation_direction)
-        if angle > threshold_degrees:  # threshold in degrees for when to update rotation
+        if angle > threshold_degrees:
             self.rotate_towards_position(position=target_position)
             self.discrete_rotation_direction = vec3(to_target_normalized)
 
     def _get_threshold_degrees_for_distance(self, distance):
-        """Returns a threshold angle in degrees for updating rotation based on distance to target. Closer distance should have lower threshold for more responsive rotation."""
         if distance > 2000:
             return 20.0
         elif distance > 500:
@@ -1484,3 +1399,226 @@ class PlanetDiscreteLOD(PlanetMeshGPU):
         else:
             return 2.0
 
+
+class TexturedPlanetMeshGPU(IcosphereSubdivided):
+    """
+    Icosphere planet mesh with texture support. Performs terrain displacement on the GPU
+    via a vertex shader and uses diffuse/specular textures for coloring.
+
+    - diffuse_texture: OpenGL texture ID for diffuse texture
+    - specular_texture: OpenGL texture ID for specular texture
+    """
+
+    def __init__(self, shader_program, subdivisions=0, position=vec3(0.0, 0.0, 0.0),
+                 scale=1.0, projection=None, diffuse_texture=None, specular_texture=None,
+                 octaves=5, lacunarity=1.0, gain=1.0, amplitude=1.0, frequency=1.0, seed=1,
+                 shininess=32.0):
+        self.diffuse_texture = diffuse_texture
+        self.specular_texture = specular_texture
+        self.shininess = shininess
+        self.octaves = octaves
+        self.lacunarity = lacunarity
+        self.gain = gain
+        self.amplitude = amplitude
+        self.frequency = frequency
+        self.seed = seed
+
+        # Generate vertices with texture coordinates before calling parent init
+        # Parent will call generate_vertices which we override
+        super().__init__(shader_program, subdivisions, position, scale, projection)
+
+        glUseProgram(self.shader_program)
+        # Default uniform values for noise parameters
+        glUniform1i(glGetUniformLocation(self.shader_program, "octaves"), octaves)
+        glUniform1f(glGetUniformLocation(self.shader_program, "lacunarity"), lacunarity)
+        glUniform1f(glGetUniformLocation(self.shader_program, "gain"), gain)
+        glUniform1f(glGetUniformLocation(self.shader_program, "amplitude"), amplitude)
+        glUniform1f(glGetUniformLocation(self.shader_program, "frequency"), frequency)
+        glUniform1f(glGetUniformLocation(self.shader_program, "seed"), seed)
+        glUniform1f(glGetUniformLocation(self.shader_program, "sphere_radius"), self.scale)
+        glUniform1f(glGetUniformLocation(self.shader_program, "shininess"), shininess)
+        glUseProgram(0)
+
+    def generate_vertices(self, position, scale, face_subdivisions):
+        """
+        Generate vertex data with texture coordinates.
+        Returns interleaved array: [pos.x, pos.y, pos.z, normal.x, normal.y, normal.z, tex.u, tex.v] * N
+        """
+        # base icosahedron vertices
+        t = (1.0 + np.sqrt(5.0)) / 2.0
+        base_verts = [
+            (-1,  t,  0), ( 1,  t,  0), (-1, -t,  0), ( 1, -t,  0),
+            ( 0, -1,  t), ( 0,  1,  t), ( 0, -1, -t), ( 0,  1, -t),
+            ( t,  0, -1), ( t,  0,  1), (-t,  0, -1), (-t,  0,  1),
+        ]
+        vertices_unit = [np.array(v, dtype=np.float64) / np.linalg.norm(v) for v in base_verts]
+
+        faces = [
+            (0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11),
+            (1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6), (7, 1, 8),
+            (3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9),
+            (4, 9, 5), (2, 4, 11), (6, 2, 10), (8, 6, 7), (9, 8, 1),
+        ]
+
+        def subdivide_triangle(v0, v1, v2, level):
+            if level == 0:
+                return [(v0, v1, v2)]
+            a = v0 + v1
+            a = a / np.linalg.norm(a)
+            b = v1 + v2
+            b = b / np.linalg.norm(b)
+            c = v2 + v0
+            c = c / np.linalg.norm(c)
+            tris = []
+            tris.extend(subdivide_triangle(v0, a, c, level - 1))
+            tris.extend(subdivide_triangle(a, v1, b, level - 1))
+            tris.extend(subdivide_triangle(c, b, v2, level - 1))
+            tris.extend(subdivide_triangle(a, b, c, level - 1))
+            return tris
+
+        def spherical_uv(normal):
+            """Convert a normalized 3D position/normal to spherical UV coordinates."""
+            # Using spherical mapping (longitude/latitude)
+            x, y, z = normal[0], normal[1], normal[2]
+            u = 0.5 + np.arctan2(z, x) / (2 * np.pi)
+            v = 0.5 - np.arcsin(np.clip(y, -1.0, 1.0)) / np.pi
+            return np.array([u, v], dtype=np.float32)
+
+        positions = []
+        normals = []
+        texcoords = []
+        indices = []
+
+        pos_offset = np.array([position.x, position.y, position.z], dtype=np.float32)
+        next_index = 0
+
+        for face_idx, tri in enumerate(faces):
+            lvl = face_subdivisions[face_idx]
+            v0 = vertices_unit[tri[0]]
+            v1 = vertices_unit[tri[1]]
+            v2 = vertices_unit[tri[2]]
+
+            small_tris = subdivide_triangle(v0, v1, v2, lvl)
+            for st in small_tris:
+                for v in st:
+                    n = np.array(v, dtype=np.float32)               # normal = unit vector
+                    p = n * float(scale) + pos_offset               # position scaled and offset
+                    uv = spherical_uv(n)                            # texture coordinates
+                    positions.append(p)
+                    normals.append(n)
+                    texcoords.append(uv)
+                    indices.append(next_index)
+                    next_index += 1
+
+        if len(positions) == 0:
+            positions = [np.array([0.0, 0.0, 0.0], dtype=np.float32)]
+            normals = [np.array([0.0, 0.0, 1.0], dtype=np.float32)]
+            texcoords = [np.array([0.0, 0.0], dtype=np.float32)]
+            indices = [0]
+
+        positions_arr = np.vstack(positions).astype(np.float32)
+        normals_arr = np.vstack(normals).astype(np.float32)
+        texcoords_arr = np.vstack(texcoords).astype(np.float32)
+
+        # Interleave: position (3) + normal (3) + texcoord (2) = 8 floats per vertex
+        interleaved = np.hstack((positions_arr, normals_arr, texcoords_arr)).flatten().astype(np.float32)
+
+        self.indices = np.array(indices, dtype=np.uint32)
+        self.index_count = int(self.indices.size)
+
+        return interleaved
+
+    def setup_buffers(self):
+        """
+        Set up VAO, VBO, EBO for the textured planet mesh.
+        """
+        self.VAO = glGenVertexArrays(1)
+        glBindVertexArray(self.VAO)
+
+        self.VBO = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, self.VBO)
+        glBufferData(GL_ARRAY_BUFFER, self.vertices.nbytes, self.vertices, GL_STATIC_DRAW)
+
+        self.EBO = glGenBuffers(1)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.EBO)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, self.indices.nbytes, self.indices, GL_STATIC_DRAW)
+
+        # Vertex attributes: 8 floats per vertex (3 pos + 3 normal + 2 texcoord)
+        stride = 8 * self.vertices.itemsize
+
+        # position -> location 0 (vec3)
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+
+        # normal -> location 1 (vec3)
+        glEnableVertexAttribArray(1)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(3 * self.vertices.itemsize))
+
+        # texcoord -> location 2 (vec2)
+        glEnableVertexAttribArray(2)
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(6 * self.vertices.itemsize))
+
+        glBindVertexArray(0)
+
+    def draw(self, view_matrix):
+        """
+        Draw the textured planet mesh.
+        """
+        model = self.model_matrix
+        view = np.array(view_matrix, dtype=np.float32).reshape((4, 4))
+
+        glUseProgram(self.shader_program)
+
+        # Set matrices
+        loc_model = glGetUniformLocation(self.shader_program, "model")
+        if loc_model != -1:
+            glUniformMatrix4fv(loc_model, 1, GL_FALSE, model)
+
+        loc_view = glGetUniformLocation(self.shader_program, "view")
+        if loc_view != -1:
+            glUniformMatrix4fv(loc_view, 1, GL_FALSE, view)
+
+        loc_proj = glGetUniformLocation(self.shader_program, "projection")
+        if loc_proj != -1:
+            glUniformMatrix4fv(loc_proj, 1, GL_FALSE, self.projection)
+
+        # Bind textures with GL_REPEAT wrapping
+        if self.diffuse_texture is not None:
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, self.diffuse_texture)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+            glUniform1i(glGetUniformLocation(self.shader_program, "diffuse_texture"), 0)
+
+        if self.specular_texture is not None:
+            glActiveTexture(GL_TEXTURE1)
+            glBindTexture(GL_TEXTURE_2D, self.specular_texture)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+            glUniform1i(glGetUniformLocation(self.shader_program, "specular_texture"), 1)
+
+        glBindVertexArray(self.VAO)
+        glDrawElements(GL_TRIANGLES, self.index_count, GL_UNSIGNED_INT, ctypes.c_void_p(0))
+        glBindVertexArray(0)
+
+        glUseProgram(0)
+
+    def update_noise_parameter(self, parameter, value):
+        glUseProgram(self.shader_program)
+        if parameter == "octaves":
+            glUniform1i(glGetUniformLocation(self.shader_program, "octaves"), value)
+            return
+        glUniform1f(glGetUniformLocation(self.shader_program, parameter), value)
+        glUseProgram(0)
+
+    def cleanup(self):
+        """Delete OpenGL buffers."""
+        try:
+            if hasattr(self, 'VAO'):
+                glDeleteVertexArrays(1, [self.VAO])
+            if hasattr(self, 'VBO'):
+                glDeleteBuffers(1, [self.VBO])
+            if hasattr(self, 'EBO'):
+                glDeleteBuffers(1, [self.EBO])
+        except Exception:
+            pass

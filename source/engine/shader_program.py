@@ -7,13 +7,13 @@ from OpenGL.raw.GL.VERSION.GL_2_0 import GL_VERTEX_SHADER, GL_FRAGMENT_SHADER
 
 
 def create_compute_shader(shader_file):
-    with open(shader_file, 'r') as file:
+    with open(shader_file, 'r', encoding='utf-8-sig') as file:
         return compileProgram(compileShader(file.read(), GL_COMPUTE_SHADER))
 
 def create_shader(vertex_file, fragment_file):
-    with open(vertex_file, 'r') as file:
+    with open(vertex_file, 'r', encoding='utf-8-sig') as file:
         vertex_src = file.read()
-    with open(fragment_file, 'r') as file:
+    with open(fragment_file, 'r', encoding='utf-8-sig') as file:
         fragment_src = file.read()
     return compileProgram(compileShader(vertex_src, GL_VERTEX_SHADER), compileShader(fragment_src, GL_FRAGMENT_SHADER))
 

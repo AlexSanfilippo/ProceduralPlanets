@@ -117,4 +117,8 @@ void main()
 
     vec3 result = ambient + diffuse + specular;
     frag_color = vec4(result, 1.0);
+    //vec3 white = vec3(1.0);
+    //frag_color = vec4(white, 1.0);
+    //normal coloring for demo
+    //frag_color = vec4(normal, 1.0);
 }

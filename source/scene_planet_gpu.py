@@ -28,6 +28,8 @@ import numpy as np
 from OpenGL.GL import *
 from pyglm.glm import vec3
 
+from signed_distance_function import Sphere, SphereTransparent, Atmosphere
+
 #todo: move to config file
 config_scene = {
     "background_color": [0.0, 0.1, 0.1, 1.0],
@@ -45,11 +47,22 @@ logger.setLevel(logging.DEBUG)
 
 
 """===============GLOBAL VARIABLES======================="""
-WIDTH, HEIGHT = 1728, 972
+# WIDTH, HEIGHT = 1728, 972
+WIDTH, HEIGHT = 400, 200
 WINDOW_POSITION = (40, 40)
 WRITE_TO_GIF = False
+DRAW_GUI = True
 lastX, lastY = WIDTH / 2, HEIGHT / 2
-DRAW_DISTANCE = 10000
+DRAW_DISTANCE = 30000
+NEAR_PLANE_MIN = 0.1
+NEAR_PLANE_MAX = 10.0
+NEAR_PLANE = NEAR_PLANE_MAX
+DRAW_DEBUG_LINES = False
+camera_speed = 25.0
+PLANET_RADIUS = 320.0
+PLANET_AXIS = vec3(0.5, 1.0, 0.0)  # defines the north-south poles
+VIEW_MODE = 0          # 0: terrain, 1: normals, 2: heat map
+GLOBAL_TEMPERATURE = 0.0
 
 #key-input globals
 first_mouse = True
@@ -59,7 +72,6 @@ yaw_counterclockwise, yaw_clockwise = False, False
 up, down = False, False
 pause = False
 switch_view_mode = False
-test_subdivide = False
 # initializing glfw library
 if not glfw.init():
     raise Exception("glfw can not be initialized!")
@@ -79,7 +91,7 @@ glfw.set_window_pos(window, *WINDOW_POSITION)
 def key_input_clb(window, key, scancode, action, mode):
     global left, right, forward, backward, make_new_surface, player_left, player_right, player_forward, \
         player_backward, yaw_counterclockwise, yaw_clockwise, \
-        pause, up, down, wrote_to_gif, switch_view_mode, test_subdivide
+        pause, up, down, wrote_to_gif, switch_view_mode, camera_speed, DRAW_GUI, WRITE_TO_GIF
 
     if key == glfw.KEY_ESCAPE and action == glfw.PRESS:
         glfw.set_window_should_close(window, True)
@@ -125,8 +137,6 @@ def key_input_clb(window, key, scancode, action, mode):
         switch_camera_mode()
     if key == glfw.KEY_F12 and action == glfw.PRESS:
         capture_screenshot(width=WIDTH, height=HEIGHT)
-    if key == glfw.KEY_Y and action == glfw.PRESS:
-        test_subdivide = True
     if key == glfw.KEY_H and action == glfw.PRESS:
         planet.lod_increase()
     if key == glfw.KEY_J and action == glfw.PRESS:
@@ -137,6 +147,18 @@ def key_input_clb(window, key, scancode, action, mode):
         planet.rotate_planet(axis=(0.25, 1.0, 0.44), angle_degrees=10)
     if key == glfw.KEY_N and action == glfw.PRESS:
         print_camera_position()
+    if key == glfw.KEY_LEFT_ALT and action == glfw.PRESS:
+        camera_speed = max(1.0, camera_speed - 5.0)
+        print(f"Camera speed: {camera_speed:.1f}")
+    if key == glfw.KEY_LEFT_CONTROL and action == glfw.PRESS:
+        camera_speed += 5.0
+        print(f"Camera speed: {camera_speed:.1f}")
+    if key == glfw.KEY_F10 and action == glfw.PRESS:
+        DRAW_GUI = not DRAW_GUI
+        print(f"GUI drawing: {'ON' if DRAW_GUI else 'OFF'}")
+    if key == glfw.KEY_F11 and action == glfw.PRESS:
+        WRITE_TO_GIF = not WRITE_TO_GIF
+        print(f"Write to GIF: {'ON' if WRITE_TO_GIF else 'OFF'}")
 
 
 def mouse_look_clb(window, xpos, ypos):
@@ -219,8 +241,8 @@ glfw.set_mouse_button_callback(window, mouse_button_callback)
 glfw.make_context_current(window)
 
 """CAMERA SETUP"""
-sim_cam = SimulationCamera(camera_pos=[150.0, 20.0, 0.0])
-cam = RollableCamera(camera_pos=[250.0, 20.0, 20.0], mouse_sensitivity=0.1)
+sim_cam = SimulationCamera(camera_pos=[PLANET_RADIUS * 2.0, 20.0, 0.0])
+cam = RollableCamera(camera_pos=[PLANET_RADIUS * 2.0, 20.0, 20.0], mouse_sensitivity=0.1)
 use_sim_cam = True
 active_camera = sim_cam
 
@@ -268,11 +290,13 @@ textures = glGenTextures(12)
 load_texture("engine/textures/button_atlas_gradient.png", textures[0])
 load_texture("engine/fonts/my_font.png", textures[1])
 load_texture("engine/textures/banana.png", textures[2])
+load_texture("engine/textures/dirt.jpg", textures[3])
 
 texture_dictionary = {
     "button_atlas": textures[0],
     "font_atlas": textures[1],
     "banana": textures[2],
+    "cloud": textures[3],
 }
 
 """Shader Compilation"""
@@ -282,25 +306,27 @@ shader_program_pos_normal = create_shader(vertex_file='engine/shaders/pos_norm.v
 shader_point_light = create_shader(vertex_file='engine/shaders/pos_norm.vs', fragment_file='engine/shaders/terrain_height_coloring.fs')
 shader_terrain_gpu = create_shader(vertex_file='engine/shaders/terrain_planet.vs', fragment_file='engine/shaders/terrain_coloring_gpu.fs')
 shader_line = create_shader(vertex_file='engine/shaders/line.vs', fragment_file='engine/shaders/line.fs')
+# shader_cloud = create_shader(vertex_file='engine/shaders/cloud_sphere.vs', fragment_file='engine/shaders/cloud_sphere.fs')
 
 
-projection = pyrr.matrix44.create_perspective_projection_matrix(45, WIDTH / HEIGHT, 0.1, DRAW_DISTANCE)
+projection = pyrr.matrix44.create_perspective_projection_matrix(45, WIDTH / HEIGHT, NEAR_PLANE, DRAW_DISTANCE)
 
 """GUI CREATION"""
 gui = GUI(screen_size=(WIDTH, HEIGHT))
 
 """Planet Controls"""
 planet_settings = {
-    "lacunarity": 2.700,
-    "gain": 0.6,
+    "lacunarity": 2.400,
+    "gain": 0.750,
     "amplitude": 1.25,
-    "frequency": 0.09,
+    "frequency": 0.010,
     "seed": int(random()*500),
     "subdivisions": 4,
     "octaves": 8,
     "noise_method": fbm_terrain_3d,
     "displacement_amplitude": 10.0,
-    "planet_type": "Mars"
+    "planet_type": "Earth",
+    "draw_hydrosphere": 1,
 }
 
 def next_seed():
@@ -322,7 +348,7 @@ planet = PlanetDiscreteLOD(
         subdivisions = 4,
         shader_program=shader_terrain_gpu,
         position=vec3(0.0, 0.0, 0.0),
-        scale=160.0,
+        scale=PLANET_RADIUS,
         projection=projection,
         planet_type = planet_settings['planet_type'],
         octaves=planet_settings['octaves'],
@@ -336,7 +362,9 @@ planet = PlanetDiscreteLOD(
 #use the nebula textures for a more interesting skybox
 skybox_paths = ["engine/textures/nebula/skybox_left.png", "engine/textures/nebula/skybox_right.png", "engine/textures/nebula/skybox_up.png",] \
                 + ["engine/textures/nebula/skybox_down.png", "engine/textures/nebula/skybox_front.png", "engine/textures/nebula/skybox_back.png"]
-skybox = Skybox(skybox_paths, scale=2000)
+skybox = Skybox(skybox_paths, scale=10000)
+
+
 
 def regenerate_planet():
     global planet, planet_settings
@@ -345,7 +373,7 @@ def regenerate_planet():
         subdivisions=planet_settings["subdivisions"],
         shader_program=shader_terrain_gpu,
         position=vec3(0.0, 0.0, 0.0),
-        scale=160.0,
+        scale=PLANET_RADIUS,
         projection=projection,
         planet_type=planet_settings["planet_type"],
         octaves = planet_settings['octaves'],
@@ -361,36 +389,6 @@ def change_planet_setting(delta=0.05, setting="lacunarity"):
     planet.update_noise_parameter(parameter=setting, value=planet_settings[setting])
     print(f"Changed {setting} to {planet_settings[setting]:.3f}")
 
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.15,0.05),
-    position=(-0.85,-0.75),
-    text="displacement +",
-    font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = +0.5,
-    setting = "displacement_amplitude",
-)
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.15,0.05),
-    position=(-0.65,-0.75),
-    text="displacement -",
-    font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = -0.5,
-    setting = "displacement_amplitude",
-)
 
 gui.add_text_button(
     font_texture=texture_dictionary["font_atlas"],
@@ -588,46 +586,195 @@ gui.add_text_button(
 )
 
 
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.20,0.05),
-    position=(-0.55,0.95),
-    text="New Planet",
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=regenerate_planet,
-)
+
+def change_sdf_radius(delta=5.0):
+    sdf_ocean.radius = max(1.0, sdf_ocean.radius + delta)
+    print(f"SDF radius: {sdf_ocean.radius:.1f}")
 
 gui.add_text_button(
     font_texture=texture_dictionary["font_atlas"],
     shader=None,
     texture=texture_dictionary["button_atlas"],
-    scale=(0.20,0.05),
-    position=(-0.80,0.55),
-    text="subdivisions +",
+    scale=(0.15, 0.05),
+    position=(-0.45, -0.75),
+    text="SDF radius +",
+    font_size=0.2,
     context_id="button_1",
     atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta= +1,
-    setting="subdivisions",
+    atlas_coordinate=(0, 0),
+    click_function=change_sdf_radius,
+    delta=0.125,
 )
 gui.add_text_button(
     font_texture=texture_dictionary["font_atlas"],
     shader=None,
     texture=texture_dictionary["button_atlas"],
-    scale=(0.20,0.05),
-    position=(-0.80,0.45),
-    text="subdivisions -",
+    scale=(0.15, 0.05),
+    position=(-0.25, -0.75),
+    text="SDF radius -",
+    font_size=0.2,
     context_id="button_1",
     atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta= -1,
-    setting="subdivisions",
+    atlas_coordinate=(0, 0),
+    click_function=change_sdf_radius,
+    delta=-0.125,
+)
+
+def change_sdf_max_depth(delta=5.0):
+    sdf_ocean.max_depth = max(1.0, sdf_ocean.max_depth + delta)
+    print(f"SDF max_depth: {sdf_ocean.max_depth:.1f}")
+
+gui.add_text_button(
+    font_texture=texture_dictionary["font_atlas"],
+    shader=None,
+    texture=texture_dictionary["button_atlas"],
+    scale=(0.15, 0.05),
+    position=(-0.45, -0.85),
+    text="max_depth +",
+    font_size=0.2,
+    context_id="button_1",
+    atlas_size=2,
+    atlas_coordinate=(0, 0),
+    click_function=change_sdf_max_depth,
+    delta=5.0,
+)
+gui.add_text_button(
+    font_texture=texture_dictionary["font_atlas"],
+    shader=None,
+    texture=texture_dictionary["button_atlas"],
+    scale=(0.15, 0.05),
+    position=(-0.25, -0.85),
+    text="max_depth -",
+    font_size=0.2,
+    context_id="button_1",
+    atlas_size=2,
+    atlas_coordinate=(0, 0),
+    click_function=change_sdf_max_depth,
+    delta=-5.0,
+)
+
+def change_sdf_transparency(delta=0.05):
+    sdf_ocean.transparency = max(0.0, min(1.0, sdf_ocean.transparency + delta))
+    print(f"SDF transparency: {sdf_ocean.transparency:.2f}")
+
+gui.add_text_button(
+    font_texture=texture_dictionary["font_atlas"],
+    shader=None,
+    texture=texture_dictionary["button_atlas"],
+    scale=(0.15, 0.05),
+    position=(-0.45, -0.95),
+    text="transparency +",
+    font_size=0.2,
+    context_id="button_1",
+    atlas_size=2,
+    atlas_coordinate=(0, 0),
+    click_function=change_sdf_transparency,
+    delta=0.05,
+)
+gui.add_text_button(
+    font_texture=texture_dictionary["font_atlas"],
+    shader=None,
+    texture=texture_dictionary["button_atlas"],
+    scale=(0.15, 0.05),
+    position=(-0.25, -0.95),
+    text="transparency -",
+    font_size=0.2,
+    context_id="button_1",
+    atlas_size=2,
+    atlas_coordinate=(0, 0),
+    click_function=change_sdf_transparency,
+    delta=-0.05,
+)
+
+def toggle_hydrosphere():
+    planet_settings["draw_hydrosphere"] = 1 - planet_settings["draw_hydrosphere"]
+    state = "ON" if planet_settings["draw_hydrosphere"] else "OFF"
+    print(f"Hydrosphere: {state}")
+
+gui.add_text_button(
+    font_texture=texture_dictionary["font_atlas"],
+    shader=None,
+    texture=texture_dictionary["button_atlas"],
+    scale=(0.15, 0.05),
+    position=(-0.05, -0.75),
+    text="Hydrosphere",
+    font_size=0.2,
+    context_id="button_1",
+    atlas_size=2,
+    atlas_coordinate=(0, 0),
+    click_function=toggle_hydrosphere,
+)
+
+def set_view_normals():
+    global VIEW_MODE
+    VIEW_MODE = 0 if VIEW_MODE == 1 else 1
+    names = {0: "Terrain", 1: "Normals", 2: "Heat"}
+    print(f"View mode: {names[VIEW_MODE]}")
+
+def set_view_heat():
+    global VIEW_MODE
+    VIEW_MODE = 0 if VIEW_MODE == 2 else 2
+    names = {0: "Terrain", 1: "Normals", 2: "Heat"}
+    print(f"View mode: {names[VIEW_MODE]}")
+
+def change_global_temperature(delta=0.05):
+    global GLOBAL_TEMPERATURE
+    GLOBAL_TEMPERATURE += delta
+    print(f"Global temperature: {GLOBAL_TEMPERATURE:.2f}")
+
+gui.add_text_button(
+    font_texture=texture_dictionary["font_atlas"],
+    shader=None,
+    texture=texture_dictionary["button_atlas"],
+    scale=(0.15, 0.05),
+    position=(0.15, -0.75),
+    text="View Normals",
+    font_size=0.2,
+    context_id="button_1",
+    atlas_size=2,
+    atlas_coordinate=(0, 0),
+    click_function=set_view_normals,
+)
+gui.add_text_button(
+    font_texture=texture_dictionary["font_atlas"],
+    shader=None,
+    texture=texture_dictionary["button_atlas"],
+    scale=(0.15, 0.05),
+    position=(0.35, -0.75),
+    text="View Heat",
+    font_size=0.2,
+    context_id="button_1",
+    atlas_size=2,
+    atlas_coordinate=(0, 0),
+    click_function=set_view_heat,
+)
+gui.add_text_button(
+    font_texture=texture_dictionary["font_atlas"],
+    shader=None,
+    texture=texture_dictionary["button_atlas"],
+    scale=(0.15, 0.05),
+    position=(0.15, -0.85),
+    text="Temp +",
+    font_size=0.2,
+    context_id="button_1",
+    atlas_size=2,
+    atlas_coordinate=(0, 0),
+    click_function=change_global_temperature,
+    delta=0.05,
+)
+gui.add_text_button(
+    font_texture=texture_dictionary["font_atlas"],
+    shader=None,
+    texture=texture_dictionary["button_atlas"],
+    scale=(0.15, 0.05),
+    position=(0.35, -0.85),
+    text="Temp -",
+    font_size=0.2,
+    context_id="button_1",
+    atlas_size=2,
+    atlas_coordinate=(0, 0),
+    click_function=change_global_temperature,
+    delta=-0.05,
 )
 
 # must call as final setup of GUI
@@ -642,6 +789,18 @@ def update_planet_lights(shader):
     glUniform1f(glGetUniformLocation(shader, "shininess"), 4.0)
     glUniform3fv(glGetUniformLocation(shader, "object_color"), 1, [0.15, 0.2, 0.25])
     glUniform3fv(glGetUniformLocation(shader, "view_pos"), 1, list(active_camera.camera_pos))
+
+     # Pass the SDF ocean radius so the terrain shader can discard submerged fragments.
+    # When the planet is not Earth (no ocean), pass 0 to disable discarding.
+    if planet_settings.get('planet_type', '') == 'Earth':
+        glUniform1f(glGetUniformLocation(shader, "sdf_radius"), sdf_ocean.radius)
+    else:
+        glUniform1f(glGetUniformLocation(shader, "sdf_radius"), 0.0)
+
+    glUniform1i(glGetUniformLocation(shader, "draw_hydrosphere"), planet_settings.get("draw_hydrosphere", 1))
+    glUniform3fv(glGetUniformLocation(shader, "planet_axis"), 1, list(PLANET_AXIS))
+    glUniform1i(glGetUniformLocation(shader, "view_mode"), VIEW_MODE)
+    glUniform1f(glGetUniformLocation(shader, "global_temperature"), GLOBAL_TEMPERATURE)
 
     glUniform3fv(glGetUniformLocation(shader, "point_light.position"), 1, my_plc.get_pos())
 
@@ -704,202 +863,186 @@ def update_lights(shader):
 shaders_lighting = [planet.shader_program]
 
 
-def subdivide_method(v0, v1, v2, level):
-    num = random()
-    if num > 0.5:
-        return False
-    return True
-
-
-def make_player_proximity_condition(player_position: vec3,
-                                    center: vec3 = vec3(0.0, 0.0, 0.0),
-                                    max_angle_deg: float = 15.0):
-    """
-    Returns a function `condition(v0, v1, v2, level) -> bool` suitable for
-    `adaptive_subdivide`. Subdivides when the triangle normal is within
-    `max_angle_deg` of the vector (center -> player_position).
-    """
-    dir_vec = np.array([player_position.x - center.x,
-                        player_position.y - center.y,
-                        player_position.z - center.z], dtype=np.float64)
-    norm = np.linalg.norm(dir_vec)
-    # if player sits at center, indicate "match all" (subdivide everything)
-    dir_norm = None if norm == 0.0 else (dir_vec / norm)
-    cos_thresh = np.cos(np.deg2rad(float(max_angle_deg)))
-
-    def condition(v0, v1, v2, level):
-        # v0, v1, v2 are unit-length numpy arrays (float64) provided by adaptive_subdivide
-        if dir_norm is None:
-            return True
-        fn = v0 + v1 + v2
-        fn_len = np.linalg.norm(fn)
-        if fn_len == 0.0:
-            return False
-        fn_norm = fn / fn_len
-        dot = float(np.dot(fn_norm, dir_norm))
-        # True if angle between face normal and player direction <= max_angle_deg
-        return dot >= cos_thresh
-
-    return condition
-
-
-def converging_sequence(n):
-    """
-    Returns the first n values of the sequence:
-    0.5, 0.75, 0.875, ... converging to 1.
-
-    Formula: a_k = 1 - 1/(2^k)
-    """
-    return [1 - 1 / (2 ** k) for k in range(1, n + 1)]
-
-
-
-def make_player_level_condition(player_position: vec3,
-                                center: vec3 = vec3(0.0, 0.0, 0.0),
-                                max_sublevel: int = 5,
-                                angle_sensitivity: float = 32.0
-                                ):
-    """
-    Returns condition(v0, v1, v2, level) -> bool for adaptive_subdivide.
-
-    - player_position: pyglm.vec3 world-space player position
-    - center:   pyglm.vec3 center of the icosphere
-    - max_sublevel: maximum desired subdivision level (int >= 0)
-
-    The function computes the averaged triangle normal (normalized) and the
-    normalized direction from center to player. The dot product is mapped to
-    [0,1] and scaled to [0, max_sublevel] to produce a target subdivision
-    depth. The predicate returns True when the current `level` is less than
-    that target (i.e. keep subdividing until reaching target).
-    """
-
-    n = max_sublevel  # number of terms you want
-    dot_to_lod = {1 - 1 / (2 ** k): k for k in range(1, n + 1)}
-
-    max_sublevel = int(max(0, max_sublevel))
-    dir_vec = np.array([player_position.x - center.x,
-                        player_position.y - center.y,
-                        player_position.z - center.z], dtype=np.float64)
-    dir_norm_val = None
-    dir_len = np.linalg.norm(dir_vec)
-    if dir_len > 0.0:
-        dir_norm_val = dir_vec / dir_len
-
-    def condition(v0, v1, v2, level):
-        # v0, v1, v2 are unit-length numpy arrays (float64)
-        # If player at center -> subdivide up to max_sublevel
-        if dir_norm_val is None:
-            return int(level) < max_sublevel
-
-        fn = v0 + v1 + v2
-        fn_len = np.linalg.norm(fn)
-        if fn_len == 0.0:
-            return False
-
-        fn_norm = fn / fn_len
-        dot = float(np.dot(fn_norm, dir_norm_val))
-        dot = float(np.clip(dot, -1.0, 1.0))
-
-
-        # map dot from [-1,1] to [0,1], where 1 means perfectly aligned
-        t = (dot + 1.0) * 0.5
-
-        # t = np.sign(t) * (np.abs(t) ** angle_sensitivity)
-        #
-        # # desired target subdivision level (0..max_sublevel)
-        # target_level = int(round(t * max_sublevel))
-        # target_level = max(0, min(max_sublevel, target_level))
-
-        def get_target_level():
-            for k,v in dot_to_lod.items():
-                if t < k:
-                    return v
-                else:
-                    pass
-            return max(dot_to_lod.values())
-
-        target_level = get_target_level()
-
-        return int(level) < int(target_level)
-
-    return condition
-
-
-def get_subdivision_level(player_pos, planet_pos, planet_radius, max_subdivision):
-    """
-    Returns subdivision level (0..max_subdivision) based on player distance to planet.
-    Closer player yields higher level; farther yields lower.
-    Each next level requires 1/4 the previous distance.
-    """
-    d = np.linalg.norm(np.array([player_pos.x, player_pos.y, player_pos.z]) -
-                      np.array([planet_pos.x, planet_pos.y, planet_pos.z]))
-    surface_dist = max(0.0, d - planet_radius)
-    initial_threshold = planet_radius * 20.0  # adjust as needed
-
-    level = 1
-    threshold = initial_threshold
-    for i in range(max_subdivision):
-        if surface_dist <= threshold:
-            level = i + 1
-        threshold *= 0.5
-
-    return min(level, max_subdivision)
-
 
 line_test = Line(shader_program=shader_line,
                  start=vec3([0.0, 0.0, 0.0]),
                  end=vec3([0.0, 1000.0, 0.0]),
                  projection=projection)
 
-while not glfw.window_should_close(window):
+sdf_ocean = SphereTransparent(
+    position=vec3(0.0, 0.0, 0.0),
+    radius=PLANET_RADIUS + .2,
+    color=vec3(0.1, 0.2, 0.6),
+    # color=vec3(0.6, 0.2, 0.1),
+    transparency=0.05,
+    max_depth=1.0,
+    near_plane=NEAR_PLANE,
+    far_plane=DRAW_DISTANCE,
+)
 
-    glfw.poll_events()
-    time_start = glfw.get_time()
-    do_movement(speed=25 * (time_delta))
+sdf_atmosphere = Atmosphere(
+    position=vec3(0.0, 0.0, 0.0),
+    # radius=PLANET_RADIUS * 1.05,
+    radius=PLANET_RADIUS * 1.03,
+    color=vec3(0.53, 0.81, 0.98),
+    transparency=0.0,
+    min_depth=0.0,
+    # max_depth=PLANET_RADIUS * 0.80,
+    max_depth=PLANET_RADIUS * 0.40,
+    near_plane=NEAR_PLANE,
+    far_plane=DRAW_DISTANCE,
+)
+
+# ---- Offscreen FBO used only for the Earth ocean post-process ----------
+# The SDF ocean shader needs scene colour + depth as textures so it can
+# composite water on top.  Non-Earth planets render directly to the
+# default framebuffer and never touch this FBO.
+scene_fbo = glGenFramebuffers(1)
+glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo)
+
+scene_color_tex = glGenTextures(1)
+glBindTexture(GL_TEXTURE_2D, scene_color_tex)
+glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, WIDTH, HEIGHT, 0,
+             GL_RGBA, GL_FLOAT, None)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scene_color_tex, 0)
+
+scene_depth_tex = glGenTextures(1)
+glBindTexture(GL_TEXTURE_2D, scene_depth_tex)
+glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, WIDTH, HEIGHT, 0,
+             GL_DEPTH_COMPONENT, GL_FLOAT, None)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, scene_depth_tex, 0)
+
+if glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE:
+    raise RuntimeError("Scene FBO is not complete!")
+glBindFramebuffer(GL_FRAMEBUFFER, 0)
+glBindTexture(GL_TEXTURE_2D, 0)
+
+# ---- Second FBO: captures ocean pass output so atmosphere can layer on top --
+ocean_fbo = glGenFramebuffers(1)
+glBindFramebuffer(GL_FRAMEBUFFER, ocean_fbo)
+
+ocean_color_tex = glGenTextures(1)
+glBindTexture(GL_TEXTURE_2D, ocean_color_tex)
+glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, WIDTH, HEIGHT, 0,
+             GL_RGBA, GL_FLOAT, None)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ocean_color_tex, 0)
+
+# Reuse the same depth texture — the ocean shader doesn't write depth
+glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, scene_depth_tex, 0)
+
+if glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE:
+    raise RuntimeError("Ocean FBO is not complete!")
+glBindFramebuffer(GL_FRAMEBUFFER, 0)
+glBindTexture(GL_TEXTURE_2D, 0)
+
+# -----------------------------------------------------------------------
+def render_scene(view):
+    """Draw skybox, planet, lights — used by both Earth and non-Earth paths."""
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
-    view = active_camera.get_view_matrix()
-
-    # draw skybox first (render as background)
     glDepthFunc(GL_LEQUAL)
     skybox.draw(view=view, projection=projection)
     glDepthFunc(GL_LESS)
 
-    planet.draw(view_matrix=view)
-    planet.draw_lines(line_shader_program=shader_line, view_matrix=view, camera_position=active_camera.camera_pos)
-
-    planet.update_lod(target_position=active_camera.camera_pos)
-
-    if test_subdivide:
-        planet.adaptive_subdivide(
-            subdivide_condition=make_player_level_condition(
-                player_position=active_camera.camera_pos,
-                center=planet.position,
-                max_sublevel=get_subdivision_level(
-                    player_pos=active_camera.camera_pos,
-                    planet_pos=planet.position,
-                    planet_radius=planet.scale,
-                    max_subdivision=12
-                ),
-                angle_sensitivity=1,
-            ),
-            regenerate=True,
-            min_recursion_level=2,
-            max_recursion_level=15,
-        )
-        test_subdivide = False
-
-
-    # draw the scene
     for shader in shaders_lighting:
         update_lights(shader=shader)
     update_planet_lights(shader=shader_terrain_gpu)
 
+    planet.draw(view_matrix=view)
+
+    if DRAW_DEBUG_LINES:
+        planet.draw_lines(line_shader_program=shader_line, view_matrix=view, camera_position=active_camera.camera_pos)
 
     for light in light_cubes:
         light.draw(view=view)
 
-    if use_sim_cam:
+# -----------------------------------------------------------------------
+def update_near_plane():
+    """Adjust NEAR_PLANE based on camera distance to planet surface."""
+    global NEAR_PLANE, projection
+    cam = active_camera.camera_pos
+    dist = np.linalg.norm(np.array([cam.x, cam.y, cam.z]) -
+                          np.array([planet.position.x, planet.position.y, planet.position.z]))
+    surface_dist = max(0.0, dist - planet.scale)
+
+    # Smoothly interpolate: when within 2× radius, start decreasing near plane
+    threshold = planet.scale * 2.0
+    if surface_dist < threshold:
+        t = surface_dist / threshold  # 0 at surface, 1 at threshold
+        NEAR_PLANE = NEAR_PLANE_MIN + t * (NEAR_PLANE_MAX - NEAR_PLANE_MIN)
+    else:
+        NEAR_PLANE = NEAR_PLANE_MAX
+
+    projection = pyrr.matrix44.create_perspective_projection_matrix(
+        45, WIDTH / HEIGHT, NEAR_PLANE, DRAW_DISTANCE)
+    planet.projection = projection
+    sdf_ocean.near_plane = NEAR_PLANE
+    sdf_atmosphere.near_plane = NEAR_PLANE
+
+# -----------------------------------------------------------------------
+while not glfw.window_should_close(window):
+
+    glfw.poll_events()
+    time_start = glfw.get_time()
+    do_movement(speed=camera_speed * (time_delta))
+
+    update_near_plane()
+
+    view = active_camera.get_view_matrix()
+
+    is_earth = planet_settings.get('planet_type', '') == 'Earth'
+
+    if is_earth:
+        # Pass 1: Render opaque scene into FBO
+        glBindFramebuffer(GL_FRAMEBUFFER, scene_fbo)
+        render_scene(view)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+        # Pass 2: Composite ocean over scene -> ocean FBO
+        glBindFramebuffer(GL_FRAMEBUFFER, ocean_fbo)
+        glClear(GL_COLOR_BUFFER_BIT)
+        sdf_ocean.draw(
+            view=view,
+            projection=projection,
+            camera_pos=active_camera.camera_pos,
+            depth_texture=scene_depth_tex,
+            scene_color_texture=scene_color_tex,
+            screen_size=(WIDTH, HEIGHT),
+        )
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+        # Pass 3: Composite atmosphere over ocean result -> default framebuffer
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        sdf_atmosphere.draw(
+            view=view,
+            projection=projection,
+            camera_pos=active_camera.camera_pos,
+            depth_texture=scene_depth_tex,
+            scene_color_texture=ocean_color_tex,
+            screen_size=(WIDTH, HEIGHT),
+        )
+    else:
+        # Non-Earth: render directly to the default framebuffer
+        render_scene(view)
+
+    #what is this?
+    planet.update_lod(target_position=active_camera.camera_pos)
+
+
+
+    if use_sim_cam and DRAW_GUI:
         gui.draw()
 
     if WRITE_TO_GIF:
