@@ -2,7 +2,7 @@
 in vec3 normal;
 in vec3 frag_pos;
 in float tilt;
-in float hydrosphere;
+in float rainfall;
 in float latitude;
 out vec4 frag_color;
 
@@ -24,8 +24,11 @@ uniform float sphere_radius;
 uniform float sdf_radius;   // radius of the SDF ocean sphere; fragments below this are discarded
 uniform int planet_type; // 0: heightmap, 1: mars-like, 2: earth-like
 uniform int draw_hydrosphere; // 0: off, 1: on
-uniform int view_mode;        // 0: terrain, 1: normals, 2: heat map
+uniform int view_mode;        // 0: terrain (deprecated), 1: normals, 2: heat map, 3: rainfall, 4: biomes, 5: biome true, 6: heightmap
 uniform float global_temperature; // offset to heat value
+uniform float global_rainfall_reduction; // planetwide rainfall reduction [0,1]
+uniform sampler2D biome_map;       // X=temperature (cold->hot), Y=rainfall (dry->wet)
+uniform sampler2D biome_true_map;  // same UV layout, photo-realistic colors
 
 
 void main()
@@ -45,6 +48,14 @@ void main()
     float height_offset = -0.0; //adjust based on terrain
     //float height_normalized = (height / amplitude_guess) - height_offset;
     float height_normalized = clamp((height) / amplitude_guess, 0.0, 1.0);
+
+    // Apply planetwide rainfall reduction
+    float rainfall_reduced = clamp(rainfall - global_rainfall_reduction, 0.0, 1.0);
+
+    // Calculate base heat (without rainfall noise) and clamp rainfall to never exceed it
+    float elevation_cooling = height_normalized * 0.80; //was 0.4
+    float base_heat = clamp((1.0 - latitude) + global_temperature - elevation_cooling, 0.0, 1.0);
+    rainfall_reduced = min(rainfall_reduced, base_heat);
 
 
     float shininess;
@@ -76,10 +87,10 @@ void main()
             object_color = mix(vec3(0.98), vec3(1.00), (h - 0.75) / 0.25); // lightest
         }
 
-        // Blend dark grey patches using hydrosphere noise
+        // Blend dark grey patches using rainfall noise
         if (draw_hydrosphere == 1) {
             vec3 dark_grey = vec3(0.30, 0.30, 0.32);
-            float patch = smoothstep(0.35, 0.65, hydrosphere) * 0.25;
+            float patch = smoothstep(0.35, 0.65, rainfall_reduced) * 0.25;
             object_color = mix(object_color, dark_grey, patch);
         }
     }
@@ -115,10 +126,10 @@ void main()
     }
 
     // Polar ice caps — blend to icy white near poles (for Earth and Mars)
-    // Use heat value (accounts for global_temperature and noise) to drive ice
+    // Use heat value (accounts for global_temperature, elevation cooling, and noise) to drive ice
     if (planet_type == 1 || planet_type == 2) {
-        float noise_offset = (hydrosphere - 0.5) * 0.15;
-        float heat = clamp((1.0 - latitude) + global_temperature + noise_offset, 0.0, 1.0);
+        float noise_offset = (rainfall_reduced - 0.5) * 0.15;
+        float heat = clamp(base_heat + noise_offset, 0.0, 1.0);
         vec3 ice_color = vec3(0.92, 0.95, 0.98);
         float ice_blend = 1.0 - smoothstep(0.15, 0.30, heat);
         object_color = mix(object_color, ice_color, ice_blend);
@@ -135,9 +146,9 @@ void main()
     }
     if (view_mode == 2) {
         // Heat map: latitude 0 (equator) = hot, latitude 1 (pole) = cold
-        // heat: 1.0 at equator, 0.0 at poles, offset by global_temperature
-        float noise_offset = (hydrosphere - 0.5) * 0.15; // perturb heat bands with noise
-        float heat = clamp((1.0 - latitude) + global_temperature + noise_offset, 0.0, 1.0);
+        // Elevation also cools: higher terrain is colder
+        float noise_offset = (rainfall_reduced - 0.5) * 0.15; // perturb heat bands with noise
+        float heat = clamp(base_heat + noise_offset, 0.0, 1.0);
         vec3 heat_color;
         if (heat < 0.25) {
             heat_color = mix(vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0), heat / 0.25);
@@ -151,13 +162,52 @@ void main()
         frag_color = vec4(heat_color, 1.0);
         return;
     }
+    if (view_mode == 3) {
+        // Rainfall map: high rainfall = deep blue, mid = light blue, low-mid = green, low (dry) = white
+        float r = rainfall_reduced; // already in [0,1]; 1=wet, 0=dry
+        vec3 rain_color;
+        if (r > 0.75) {
+            rain_color = mix(vec3(0.10, 0.30, 0.80), vec3(0.02, 0.10, 0.50), (r - 0.75) / 0.25); // light blue -> deep blue
+        } else if (r > 0.50) {
+            rain_color = mix(vec3(0.40, 0.75, 0.95), vec3(0.10, 0.30, 0.80), (r - 0.50) / 0.25); // sky blue -> light blue
+        } else if (r > 0.25) {
+            rain_color = mix(vec3(0.20, 0.65, 0.20), vec3(0.40, 0.75, 0.95), (r - 0.25) / 0.25); // green -> sky blue
+        } else {
+            rain_color = mix(vec3(0.97, 0.97, 0.97), vec3(0.20, 0.65, 0.20), r / 0.25); // white -> green
+        }
+        frag_color = vec4(rain_color, 1.0);
+        return;
+    }
+    if (view_mode == 4) {
+        // Biomes: sample a biome map texture using temperature (U) and rainfall (V)
+        // U=0 cold, U=1 hot; V=0 dry, V=1 wet
+        float noise_offset = (rainfall_reduced - 0.5) * 0.15;
+        float temp = clamp(base_heat + noise_offset, 0.0, 0.99);
+        float rain = clamp(rainfall_reduced, 0.0, 0.99);
+        rain = min(rain, temp);  // rainfall cannot exceed temperature
+        vec2 biome_uv = vec2(temp, rain);
+        vec3 biome_color = texture(biome_map, biome_uv).rgb;
+        frag_color = vec4(biome_color, 1.0);
+        return;
+    }
+    if (view_mode == 5) {
+        // Biome True: same UV lookup but using photo-realistic color texture.
+        // Does NOT return early — falls through to Phong lighting below.
+        float noise_offset = (rainfall_reduced - 0.5) * 0.15;
+        float temp = clamp(base_heat + noise_offset, 0.0, 0.99);
+        float rain = clamp(rainfall_reduced, 0.0, 0.99);
+        rain = min(rain, temp);  // rainfall cannot exceed temperature
+            vec2 biome_uv = vec2(temp, rain);
+        object_color = texture(biome_true_map, biome_uv).rgb;
+        shininess = 4.0;
+    }
+    if (view_mode == 6) {
+        // Heightmap: use the pre-computed object_color based on planet_type
+        // Falls through to Phong lighting below
+        shininess = 0.25;
+    }
 
-    //hack for rainbow normal-vector planet
-    //vec3 object_color = norm;
-
-
-
-    // Ambient
+    // ...
     vec3 ambient = point_light.ambient * object_color;
 
     // Diffuse

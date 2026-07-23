@@ -11,14 +11,14 @@ import pyrr
 
 from engine.shader_program import create_shader
 from engine.texture_loader import load_texture
-from engine.camera import Camera, SimulationCamera, RollableCamera
+from engine.camera import SimulationCamera, RollableCamera
 from engine.skybox import Skybox
 from math import sin, cos
 from glm import cos, radians
 import logging
 import engine.point_light_cube as plc
 from engine.procedural_mesh import CubeMeshStatic
-from engine.gui import GUI
+from engine.gui_batched import GUIBatched
 from engine.screen_capture import capture_screenshot, write_fbo_to_gif, save_to_gif
 from noise_generators import fbm_noise, fbm_terrain_3d
 from planet_mesh import TriangleIndexed, Cube, Icosphere, TriangleSubdivided, IcosphereSubdivided, PlanetMesh, \
@@ -47,8 +47,8 @@ logger.setLevel(logging.DEBUG)
 
 
 """===============GLOBAL VARIABLES======================="""
-# WIDTH, HEIGHT = 1728, 972
-WIDTH, HEIGHT = 400, 200
+WIDTH, HEIGHT = 1728, 972
+# WIDTH, HEIGHT = 400, 200
 WINDOW_POSITION = (40, 40)
 WRITE_TO_GIF = False
 DRAW_GUI = True
@@ -63,6 +63,7 @@ PLANET_RADIUS = 320.0
 PLANET_AXIS = vec3(0.5, 1.0, 0.0)  # defines the north-south poles
 VIEW_MODE = 0          # 0: terrain, 1: normals, 2: heat map
 GLOBAL_TEMPERATURE = 0.0
+GLOBAL_RAINFALL_REDUCTION = 0.0
 
 #key-input globals
 first_mouse = True
@@ -179,16 +180,11 @@ def scroll_callback(window, xoffset, yoffset):
 
 
 def mouse_button_callback(window, button, action, mods):
-    left_click = button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS
-    right_click = button == glfw.MOUSE_BUTTON_RIGHT and action == glfw.PRESS
-    gui.button_update(position_mouse=glfw.get_cursor_pos(window), left_click=left_click, right_click=right_click)
+    pass   # gui_batched click detection is handled continuously in the render loop
 
 
 def window_resize_clb(window, width, height):
     glViewport(0, 0, width, height)
-    # projection = pyrr.matrix44.create_perspective_projection_matrix(45, width / height, 0.1, 2000)
-    # glUniformMatrix4fv(proj_loc, 1, GL_FALSE, projection)
-    gui.set_screen_size(screen_size=(width, height))
 
 
 def do_movement(speed=1.0):
@@ -292,12 +288,16 @@ load_texture("engine/fonts/my_font.png", textures[1])
 load_texture("engine/textures/banana.png", textures[2])
 load_texture("engine/textures/dirt.jpg", textures[3])
 
-texture_dictionary = {
-    "button_atlas": textures[0],
-    "font_atlas": textures[1],
-    "banana": textures[2],
-    "cloud": textures[3],
-}
+biome_tex = glGenTextures(1)
+load_texture("engine/textures/biome_map_low_resolution.png", biome_tex)
+
+biome_true_tex = glGenTextures(1)
+# load_texture("engine/textures/biome_map_low_resolution_photo_colors.png", biome_true_tex)
+load_texture("engine/textures/biome_map_blurred_3.png", biome_true_tex)
+# load_texture("engine/textures/biome_map_alien_1.png", biome_true_tex)
+
+biome_key_tex = glGenTextures(1)
+load_texture("engine/textures/biome_key.png", biome_key_tex)
 
 """Shader Compilation"""
 #New shader for position and normal only,with 3d camera
@@ -306,13 +306,34 @@ shader_program_pos_normal = create_shader(vertex_file='engine/shaders/pos_norm.v
 shader_point_light = create_shader(vertex_file='engine/shaders/pos_norm.vs', fragment_file='engine/shaders/terrain_height_coloring.fs')
 shader_terrain_gpu = create_shader(vertex_file='engine/shaders/terrain_planet.vs', fragment_file='engine/shaders/terrain_coloring_gpu.fs')
 shader_line = create_shader(vertex_file='engine/shaders/line.vs', fragment_file='engine/shaders/line.fs')
-# shader_cloud = create_shader(vertex_file='engine/shaders/cloud_sphere.vs', fragment_file='engine/shaders/cloud_sphere.fs')
-
 
 projection = pyrr.matrix44.create_perspective_projection_matrix(45, WIDTH / HEIGHT, NEAR_PLANE, DRAW_DISTANCE)
 
 """GUI CREATION"""
-gui = GUI(screen_size=(WIDTH, HEIGHT))
+
+# ── Batched GUI setup ──────────────────────────────────────────────────────────
+_ui_atlas_path = "engine/textures/ui_gray_atlas.png"
+_ui_atlas_tex = glGenTextures(1)
+load_texture(_ui_atlas_path, _ui_atlas_tex)
+
+gui_batched = GUIBatched(
+    screen_size=(WIDTH, HEIGHT),
+    texture_atlas=_ui_atlas_tex,
+    atlas_map={
+        "button": ((39, 0), (77, 108)),
+        "slider_background": ((0, 0), (37, 109)),
+    },
+    atlas_image_path=_ui_atlas_path,
+    font_texture=textures[1],
+    font_fnt_path="engine/fonts/my_font.fnt",
+)
+
+_atm_radius_label = None   # assigned after the text element is created below
+
+def set_atmosphere_radius(value):
+    sdf_atmosphere.radius = float(value)
+    if _atm_radius_label is not None:
+        _atm_radius_label.update_text(f"{float(value):.2f}")
 
 """Planet Controls"""
 planet_settings = {
@@ -335,6 +356,23 @@ def next_seed():
     print(f"New seed: {planet_settings['seed']:.3f}")
     regenerate_planet()
 
+def update_view_mode_for_planet_type():
+    """Set default view mode and button visibility based on planet type"""
+    global VIEW_MODE
+    planet_type = planet_settings["planet_type"]
+    
+    if planet_type == "Earth":
+        # Earth: default to Biome True, show all view modes
+        VIEW_MODE = 5
+        gui_batched.switch_context_status("view_mode_buttons", True)
+    else:
+        # Moon/Mars: only show Heightmap view mode
+        VIEW_MODE = 6
+        gui_batched.switch_context_status("view_mode_buttons", False)
+    
+    names = {0: "Terrain", 1: "Normals", 2: "Heat", 3: "Rainfall", 4: "Biomes", 5: "Biome True", 6: "Heightmap"}
+    print(f"Planet type: {planet_type} | View mode: {names[VIEW_MODE]}")
+
 def cycle_planet_type():
     global planet_settings
     planet_types = ["Moon", "Earth", "Mars"]
@@ -343,6 +381,7 @@ def cycle_planet_type():
     planet_settings["planet_type"] = planet_types[new_index]
     print(f"New planet type: {planet_settings['planet_type']}")
     planet.set_planet_type(planet_settings["planet_type"])
+    update_view_mode_for_planet_type()
 
 planet = PlanetDiscreteLOD(
         subdivisions = 4,
@@ -358,12 +397,41 @@ planet = PlanetDiscreteLOD(
         frequency=planet_settings['frequency'],
 )
 
+# Set default view mode based on initial planet type
+update_view_mode_for_planet_type()
+
 # create a skybox using banana texture on all six faces
 #use the nebula textures for a more interesting skybox
 skybox_paths = ["engine/textures/nebula/skybox_left.png", "engine/textures/nebula/skybox_right.png", "engine/textures/nebula/skybox_up.png",] \
                 + ["engine/textures/nebula/skybox_down.png", "engine/textures/nebula/skybox_front.png", "engine/textures/nebula/skybox_back.png"]
 skybox = Skybox(skybox_paths, scale=10000)
 
+
+# == Create of SDFs ==
+
+sdf_ocean = SphereTransparent(
+    position=vec3(0.0, 0.0, 0.0),
+    radius=PLANET_RADIUS + .2,
+    color=vec3(0.1, 0.2, 0.6),
+    # color=vec3(0.6, 0.2, 0.1),
+    transparency=0.05,
+    max_depth=1.0,
+    near_plane=NEAR_PLANE,
+    far_plane=DRAW_DISTANCE,
+)
+
+
+sdf_atmosphere = Atmosphere(
+    position=vec3(0.0, 0.0, 0.0),
+    # radius=PLANET_RADIUS * 1.05,
+    radius=PLANET_RADIUS * 1.03,
+    color=vec3(0.53, 0.81, 0.98),
+    transparency=0.0,
+    min_depth=0.0,
+    max_depth=PLANET_RADIUS * 0.40,
+    near_plane=NEAR_PLANE,
+    far_plane=DRAW_DISTANCE,
+)
 
 
 def regenerate_planet():
@@ -390,395 +458,596 @@ def change_planet_setting(delta=0.05, setting="lacunarity"):
     print(f"Changed {setting} to {planet_settings[setting]:.3f}")
 
 
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.10,0.05),
-    position=(.85,-0.95),
-    text="Change Planet Type",
-    font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
+control_value_elements = {}
+
+
+def toggle_controls_panel():
+    gui_batched.toggle_context_status("controls_panel")
+    enabled = gui_batched._context_status.get("controls_panel", True)
+    print(f"Controls panel: {'ON' if enabled else 'OFF'}")
+
+
+def toggle_view_mode_buttons():
+    gui_batched.toggle_context_status("view_mode_buttons")
+    enabled = gui_batched._context_status.get("view_mode_buttons", True)
+    print(f"View mode buttons: {'ON' if enabled else 'OFF'}")
+
+
+def set_planet_setting_from_slider(value, setting, digits=3, clamp_min=None, clamp_max=None):
+    new_value = float(value)
+    if clamp_min is not None:
+        new_value = max(clamp_min, new_value)
+    if clamp_max is not None:
+        new_value = min(clamp_max, new_value)
+    planet_settings[setting] = new_value
+    planet.update_noise_parameter(parameter=setting, value=new_value)
+    if setting in control_value_elements:
+        control_value_elements[setting].update_text(text=f"{new_value:.{digits}f}")
+
+
+def change_seed(delta):
+    new_seed = float(np.clip(float(planet_settings["seed"]) + float(delta), 0.0, 500.0))
+    planet_settings["seed"] = new_seed
+    planet.update_noise_parameter(parameter="seed", value=new_seed)
+    if "seed" in control_value_elements:
+        control_value_elements["seed"].update_text(text=f"{int(new_seed)}")
+
+
+def set_sea_level_from_slider(value):
+    sdf_ocean.radius = float(value)
+    if "sea_level" in control_value_elements:
+        control_value_elements["sea_level"].update_text(text=f"{sdf_ocean.radius:.2f}")
+
+
+def set_global_temperature_from_slider(value):
+    global GLOBAL_TEMPERATURE
+    GLOBAL_TEMPERATURE = float(value)
+    if "temperature" in control_value_elements:
+        control_value_elements["temperature"].update_text(text=f"{GLOBAL_TEMPERATURE:.2f}")
+
+
+def set_global_rainfall_reduction_from_slider(value):
+    global GLOBAL_RAINFALL_REDUCTION
+    GLOBAL_RAINFALL_REDUCTION = float(value)
+    if "rainfall_reduction" in control_value_elements:
+        control_value_elements["rainfall_reduction"].update_text(text=f"{GLOBAL_RAINFALL_REDUCTION:.2f}")
+
+
+def set_atmosphere_max_depth_from_slider(value):
+    sdf_atmosphere.max_depth = float(value) * PLANET_RADIUS
+    if "atmos_opacity" in control_value_elements:
+        control_value_elements["atmos_opacity"].update_text(text=f"{float(value):.2f}")
+
+
+def change_octaves(delta):
+    new_octaves = int(np.clip(int(planet_settings["octaves"]) + int(delta), 1, 20))
+    planet_settings["octaves"] = new_octaves
+    planet.update_noise_parameter(parameter="octaves", value=new_octaves)
+    if "octaves" in control_value_elements:
+        control_value_elements["octaves"].update_text(text=f"{int(new_octaves)}")
+
+
+def set_atmosphere_color_component(value, component):
+    """Update a single RGB component of the atmosphere color"""
+    new_value = float(value)
+    sdf_atmosphere.color[component] = new_value
+    color_labels = ['atmos_color_r', 'atmos_color_g', 'atmos_color_b']
+    if color_labels[component] in control_value_elements:
+        control_value_elements[color_labels[component]].update_text(text=f"{new_value:.2f}")
+
+
+def set_ocean_color_component(value, component):
+    """Update a single RGB component of the ocean color"""
+    new_value = float(value)
+    sdf_ocean.color[component] = new_value
+    color_labels = ['ocean_color_r', 'ocean_color_g', 'ocean_color_b']
+    if color_labels[component] in control_value_elements:
+        control_value_elements[color_labels[component]].update_text(text=f"{new_value:.2f}")
+
+
+def toggle_atmos_color_sliders():
+    gui_batched.toggle_context_status("atmos_color_sliders")
+    enabled = gui_batched._context_status.get("atmos_color_sliders", True)
+    print(f"Atmosphere color sliders: {'ON' if enabled else 'OFF'}")
+
+
+def toggle_ocean_color_sliders():
+    gui_batched.toggle_context_status("ocean_color_sliders")
+    enabled = gui_batched._context_status.get("ocean_color_sliders", True)
+    print(f"Ocean color sliders: {'ON' if enabled else 'OFF'}")
+
+
+def add_control_slider(label, key, value, min_value, max_value, y_pos, callback):
+    gui_batched.add_text_element(
+        texture_name="button",
+        position=(-0.90, y_pos),
+        scale=(0.12, 0.03),
+        text=label,
+        font_size=0.18,
+        context_id="controls_panel",
+    )
+    control_value_elements[key] = gui_batched.add_text_element(
+        texture_name="button",
+        position=(-0.32, y_pos),
+        scale=(0.10, 0.03),
+        text=f"{value:.3f}",
+        font_size=0.18,
+        context_id="controls_panel",
+    )
+    gui_batched.add_slider(
+        bg_texture_name="slider_background",
+        knob_texture_name="button",
+        position=(-0.60, y_pos),
+        scale=(0.18, 0.025),
+        min_value=min_value,
+        max_value=max_value,
+        value=value,
+        callback=callback,
+        context_id="controls_panel",
+    )
+
+
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(0.85, -0.95),
+    scale=(0.10, 0.05),
     click_function=cycle_planet_type,
-)
-
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.10,0.05),
-    position=(-0.85,-0.95),
-    text="Octaves +",
+    text="Planet Type",
     font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = +1,
-    setting = "octaves",
+    rotate_90_cw=True,
 )
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.10,0.05),
-    position=(-0.85,-0.85),
-    text="Octaves -",
+
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(-0.90, 0.96),   # top_left: (-1.0+0.10, 1.0-0.04)
+    scale=(0.10, 0.04),
+    click_function=toggle_controls_panel,
+    text="Controls",
     font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = -1,
-    setting = "octaves",
+    rotate_90_cw=True,
+    context_status=True,
 )
 
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.20,0.05),
-    position=(-0.55,0.75),
-    text="Lacunarity -",
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = -0.05,
-    setting = "lacunarity",
-)
-
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.20,0.05),
-    position=(-0.55,0.85),
-    text="Lacunarity +",
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = 0.05,
-    setting = "lacunarity",
-)
-
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.20,0.05),
-    position=(-0.55,0.75),
-    text="Lacunarity -",
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = -0.05,
-    setting = "lacunarity",
-)
-
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.20,0.05),
-    position=(-0.25,0.85),
-    text="frequency +",
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = +0.01,
-    setting = "frequency",
-)
-
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.20,0.05),
-    position=(-0.25,0.75),
-    text="frequency -",
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = -0.01,
-    setting = "frequency",
-)
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.20,0.05),
-    position=(-0.05,0.85),
-    text="amplitude +",
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = +0.25,
-    setting = "amplitude",
-)
-
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.20,0.05),
-    position=(-0.05,0.75),
-    text="amplitude -",
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = -0.25,
-    setting = "amplitude",
-)
-
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.20,0.05),
-    position=(0.25,0.85),
-    text="gain +",
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = +0.05,
-    setting = "gain",
-)
-
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.20,0.05),
-    position=(0.25,0.75),
-    text="gain -",
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta = -0.05,
-    setting = "gain",
-)
-
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.15,0.03),
-    position=(0.85,0.95),
-    text="Next Seed",
-    context_id="button_1",
-    atlas_size=2,
-    font_size = 0.20,
-    atlas_coordinate=(0,0),
-    click_function=change_planet_setting,
-    delta=1,
-    setting="seed",
-)
-
-
-
-def change_sdf_radius(delta=5.0):
-    sdf_ocean.radius = max(1.0, sdf_ocean.radius + delta)
-    print(f"SDF radius: {sdf_ocean.radius:.1f}")
-
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.15, 0.05),
-    position=(-0.45, -0.75),
-    text="SDF radius +",
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(0.90, 0.96),   # top_right: (1.0-0.10, 1.0-0.04)
+    scale=(0.10, 0.04),
+    click_function=toggle_view_mode_buttons,
+    text="View Mode",
     font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0, 0),
-    click_function=change_sdf_radius,
-    delta=0.125,
-)
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.15, 0.05),
-    position=(-0.25, -0.75),
-    text="SDF radius -",
-    font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0, 0),
-    click_function=change_sdf_radius,
-    delta=-0.125,
+    rotate_90_cw=True,
 )
 
-def change_sdf_max_depth(delta=5.0):
-    sdf_ocean.max_depth = max(1.0, sdf_ocean.max_depth + delta)
-    print(f"SDF max_depth: {sdf_ocean.max_depth:.1f}")
-
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.15, 0.05),
-    position=(-0.45, -0.85),
-    text="max_depth +",
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(-0.50, 0.96),
+    scale=(0.12, 0.04),
+    click_function=toggle_atmos_color_sliders,
+    text="Atmos. Color",
     font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0, 0),
-    click_function=change_sdf_max_depth,
-    delta=5.0,
-)
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.15, 0.05),
-    position=(-0.25, -0.85),
-    text="max_depth -",
-    font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0, 0),
-    click_function=change_sdf_max_depth,
-    delta=-5.0,
+    rotate_90_cw=True,
 )
 
-def change_sdf_transparency(delta=0.05):
-    sdf_ocean.transparency = max(0.0, min(1.0, sdf_ocean.transparency + delta))
-    print(f"SDF transparency: {sdf_ocean.transparency:.2f}")
-
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.15, 0.05),
-    position=(-0.45, -0.95),
-    text="transparency +",
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(-0.30, 0.96),
+    scale=(0.12, 0.04),
+    click_function=toggle_ocean_color_sliders,
+    text="Ocean Color",
     font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0, 0),
-    click_function=change_sdf_transparency,
-    delta=0.05,
-)
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.15, 0.05),
-    position=(-0.25, -0.95),
-    text="transparency -",
-    font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0, 0),
-    click_function=change_sdf_transparency,
-    delta=-0.05,
+    rotate_90_cw=True,
 )
 
-def toggle_hydrosphere():
-    planet_settings["draw_hydrosphere"] = 1 - planet_settings["draw_hydrosphere"]
-    state = "ON" if planet_settings["draw_hydrosphere"] else "OFF"
-    print(f"Hydrosphere: {state}")
+add_control_slider(
+    label="Lacunarity",
+    key="lacunarity",
+    value=planet_settings["lacunarity"],
+    min_value=0.5,
+    max_value=4.0,
+    y_pos=0.90,
+    callback=lambda value: set_planet_setting_from_slider(value, "lacunarity", digits=3),
+)
 
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
-    scale=(0.15, 0.05),
-    position=(-0.05, -0.75),
-    text="Hydrosphere",
+add_control_slider(
+    label="Frequency",
+    key="frequency",
+    value=planet_settings["frequency"],
+    min_value=0.0,
+    max_value=0.01,
+    y_pos=0.80,
+    callback=lambda value: set_planet_setting_from_slider(value, "frequency", digits=4),
+)
+
+gui_batched.add_text_element(
+    texture_name="button",
+    position=(-0.90, 0.70),
+    scale=(0.12, 0.03),
+    text="Amplitude",
+    font_size=0.18,
+    context_id="controls_panel",
+)
+control_value_elements["amplitude"] = gui_batched.add_text_element(
+    texture_name="button",
+    position=(-0.32, 0.70),
+    scale=(0.10, 0.03),
+    text=f"{planet_settings['amplitude']:.3f}",
+    font_size=0.18,
+    context_id="controls_panel",
+)
+gui_batched.add_slider(
+    bg_texture_name="slider_background",
+    knob_texture_name="button",
+    position=(-0.60, 0.70),
+    scale=(0.18, 0.025),
+    min_value=0.0,
+    max_value=10.0,
+    value=planet_settings["amplitude"],
+    callback=lambda value: set_planet_setting_from_slider(value, "amplitude", digits=3),
+    context_id="controls_panel",
+)
+
+add_control_slider(
+    label="Gain",
+    key="gain",
+    value=planet_settings["gain"],
+    min_value=0.0,
+    max_value=1.0,
+    y_pos=0.60,
+    callback=lambda value: set_planet_setting_from_slider(value, "gain", digits=3),
+)
+
+add_control_slider(
+    label="Sea Level",
+    key="sea_level",
+    value=sdf_ocean.radius,
+    min_value=PLANET_RADIUS - 5.0,
+    max_value=PLANET_RADIUS + 5.0,
+    y_pos=0.50,
+    callback=set_sea_level_from_slider,
+)
+
+add_control_slider(
+    label="Temperature",
+    key="temperature",
+    value=GLOBAL_TEMPERATURE,
+    min_value=-1.0,
+    max_value=1.0,
+    y_pos=0.40,
+    callback=set_global_temperature_from_slider,
+)
+
+add_control_slider(
+    label="Rainfall Red.",
+    key="rainfall_reduction",
+    value=GLOBAL_RAINFALL_REDUCTION,
+    min_value=0.0,
+    max_value=1.0,
+    y_pos=0.30,
+    callback=set_global_rainfall_reduction_from_slider,
+)
+
+gui_batched.add_text_element(
+    texture_name="button",
+    position=(-0.90, 0.20),
+    scale=(0.12, 0.03),
+    text="Seed",
+    font_size=0.18,
+    context_id="controls_panel",
+)
+control_value_elements["seed"] = gui_batched.add_text_element(
+    texture_name="button",
+    position=(-0.32, 0.20),
+    scale=(0.10, 0.03),
+    text=f"{int(planet_settings['seed'])}",
+    font_size=0.18,
+    context_id="controls_panel",
+)
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(-0.70, 0.20),
+    scale=(0.10, 0.04),
+    click_function=lambda: change_seed(-1),
+    text="Seed -",
     font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0, 0),
-    click_function=toggle_hydrosphere,
+    rotate_90_cw=True,
+    context_id="controls_panel",
+)
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(-0.50, 0.20),
+    scale=(0.10, 0.04),
+    click_function=lambda: change_seed(1),
+    text="Seed +",
+    font_size=0.2,
+    rotate_90_cw=True,
+    context_id="controls_panel",
+)
+
+# Atmosphere radius slider
+gui_batched.add_text_element(
+    texture_name="button",
+    position=(-0.90, 0.10),
+    scale=(0.12, 0.03),
+    text="Atmosphere",
+    font_size=0.18,
+    context_id="controls_panel",
+)
+_atm_radius_label = gui_batched.add_text_element(
+    texture_name="button",
+    position=(-0.32, 0.10),
+    scale=(0.10, 0.03),
+    text=f"{PLANET_RADIUS * 1.03:.2f}",
+    font_size=0.18,
+    context_id="controls_panel",
+)
+gui_batched.add_slider(
+    bg_texture_name="slider_background",
+    knob_texture_name="button",
+    position=(-0.60, 0.10),
+    scale=(0.18, 0.025),
+    min_value=PLANET_RADIUS * 0.95,
+    max_value=PLANET_RADIUS * 1.15,
+    value=PLANET_RADIUS * 1.03,
+    callback=set_atmosphere_radius,
+    context_id="controls_panel",
+)
+
+# Atmosphere opacity slider
+gui_batched.add_text_element(
+    texture_name="button",
+    position=(-0.90, 0.00),
+    scale=(0.12, 0.03),
+    text="Atmos. Opacity",
+    font_size=0.18,
+    context_id="controls_panel",
+)
+current_atmos_opacity = sdf_atmosphere.max_depth / PLANET_RADIUS
+control_value_elements["atmos_opacity"] = gui_batched.add_text_element(
+    texture_name="button",
+    position=(-0.32, 0.00),
+    scale=(0.10, 0.03),
+    text=f"{current_atmos_opacity:.2f}",
+    font_size=0.18,
+    context_id="controls_panel",
+)
+gui_batched.add_slider(
+    bg_texture_name="slider_background",
+    knob_texture_name="button",
+    position=(-0.60, 0.00),
+    scale=(0.18, 0.025),
+    min_value=0.0,
+    max_value=1.0,
+    value=current_atmos_opacity,
+    callback=set_atmosphere_max_depth_from_slider,
+    context_id="controls_panel",
+)
+
+# Octaves controls (similar to Seed controls)
+gui_batched.add_text_element(
+    texture_name="button",
+    position=(-0.90, -0.10),
+    scale=(0.12, 0.03),
+    text="Octaves",
+    font_size=0.18,
+    context_id="controls_panel",
+)
+control_value_elements["octaves"] = gui_batched.add_text_element(
+    texture_name="button",
+    position=(-0.32, -0.10),
+    scale=(0.10, 0.03),
+    text=f"{int(planet_settings['octaves'])}",
+    font_size=0.18,
+    context_id="controls_panel",
+)
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(-0.70, -0.10),
+    scale=(0.10, 0.04),
+    click_function=lambda: change_octaves(-1),
+    text="Oct -",
+    font_size=0.2,
+    rotate_90_cw=True,
+    context_id="controls_panel",
+)
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(-0.50, -0.10),
+    scale=(0.10, 0.04),
+    click_function=lambda: change_octaves(1),
+    text="Oct +",
+    font_size=0.2,
+    rotate_90_cw=True,
+    context_id="controls_panel",
 )
 
 def set_view_normals():
     global VIEW_MODE
-    VIEW_MODE = 0 if VIEW_MODE == 1 else 1
-    names = {0: "Terrain", 1: "Normals", 2: "Heat"}
+    VIEW_MODE = 6 if VIEW_MODE == 1 else 1
+    gui_batched.switch_context_status("biome_key_overlay", VIEW_MODE == 4)
+    names = {0: "Terrain", 1: "Normals", 2: "Heat", 3: "Rainfall", 4: "Biomes", 5: "Biome True", 6: "Heightmap"}
     print(f"View mode: {names[VIEW_MODE]}")
 
 def set_view_heat():
     global VIEW_MODE
-    VIEW_MODE = 0 if VIEW_MODE == 2 else 2
-    names = {0: "Terrain", 1: "Normals", 2: "Heat"}
+    VIEW_MODE = 6 if VIEW_MODE == 2 else 2
+    gui_batched.switch_context_status("biome_key_overlay", VIEW_MODE == 4)
+    names = {0: "Terrain", 1: "Normals", 2: "Heat", 3: "Rainfall", 4: "Biomes", 5: "Biome True", 6: "Heightmap"}
     print(f"View mode: {names[VIEW_MODE]}")
 
-def change_global_temperature(delta=0.05):
-    global GLOBAL_TEMPERATURE
-    GLOBAL_TEMPERATURE += delta
-    print(f"Global temperature: {GLOBAL_TEMPERATURE:.2f}")
+def set_view_rainfall():
+    global VIEW_MODE
+    VIEW_MODE = 6 if VIEW_MODE == 3 else 3
+    gui_batched.switch_context_status("biome_key_overlay", VIEW_MODE == 4)
+    names = {0: "Terrain", 1: "Normals", 2: "Heat", 3: "Rainfall", 4: "Biomes", 5: "Biome True", 6: "Heightmap"}
+    print(f"View mode: {names[VIEW_MODE]}")
 
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
+def set_view_biomes():
+    global VIEW_MODE
+    VIEW_MODE = 6 if VIEW_MODE == 4 else 4
+    gui_batched.switch_context_status("biome_key_overlay", VIEW_MODE == 4)
+    names = {0: "Terrain", 1: "Normals", 2: "Heat", 3: "Rainfall", 4: "Biomes", 5: "Biome True", 6: "Heightmap"}
+    print(f"View mode: {names[VIEW_MODE]}")
+
+def set_view_biome_true():
+    global VIEW_MODE
+    VIEW_MODE = 6 if VIEW_MODE == 5 else 5
+    gui_batched.switch_context_status("biome_key_overlay", VIEW_MODE == 4)
+    names = {0: "Terrain", 1: "Normals", 2: "Heat", 3: "Rainfall", 4: "Biomes", 5: "Biome True", 6: "Heightmap"}
+    print(f"View mode: {names[VIEW_MODE]}")
+
+def set_view_heightmap():
+    global VIEW_MODE
+    VIEW_MODE = 1 if VIEW_MODE == 6 else 6
+    gui_batched.switch_context_status("biome_key_overlay", VIEW_MODE == 4)
+    names = {0: "Terrain", 1: "Normals", 2: "Heat", 3: "Rainfall", 4: "Biomes", 5: "Biome True", 6: "Heightmap"}
+    print(f"View mode: {names[VIEW_MODE]}")
+
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(0.85, 0.81),   # top_right: (1.0-0.15, 0.86-0.05)
     scale=(0.15, 0.05),
-    position=(0.15, -0.75),
-    text="View Normals",
-    font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0, 0),
     click_function=set_view_normals,
+    text="View Normal",
+    font_size=0.2,
+    rotate_90_cw=True,
+    context_id="view_mode_buttons",
+    context_status=False,    # starts hidden; revealed by View Mode button
 )
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(0.85, 0.69),   # top_right: (1.0-0.15, 0.74-0.05)
     scale=(0.15, 0.05),
-    position=(0.35, -0.75),
+    click_function=set_view_heat,
     text="View Heat",
     font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0, 0),
-    click_function=set_view_heat,
+    rotate_90_cw=True,
+    context_id="view_mode_buttons",
+    context_status=False,    # starts hidden; revealed by View Mode button
 )
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(0.85, 0.57),
     scale=(0.15, 0.05),
-    position=(0.15, -0.85),
-    text="Temp +",
+    click_function=set_view_rainfall,
+    text="Rainfall",
     font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0, 0),
-    click_function=change_global_temperature,
-    delta=0.05,
+    rotate_90_cw=True,
+    context_id="view_mode_buttons",
+    context_status=False,    # starts hidden; revealed by View Mode button
 )
-gui.add_text_button(
-    font_texture=texture_dictionary["font_atlas"],
-    shader=None,
-    texture=texture_dictionary["button_atlas"],
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(0.85, 0.45),
     scale=(0.15, 0.05),
-    position=(0.35, -0.85),
-    text="Temp -",
+    click_function=set_view_biomes,
+    text="Biomes",
     font_size=0.2,
-    context_id="button_1",
-    atlas_size=2,
-    atlas_coordinate=(0, 0),
-    click_function=change_global_temperature,
-    delta=-0.05,
+    rotate_90_cw=True,
+    context_id="view_mode_buttons",
+    context_status=False,    # starts hidden; revealed by View Mode button
+)
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(0.85, 0.33),
+    scale=(0.15, 0.05),
+    click_function=set_view_biome_true,
+    text="Biome True",
+    font_size=0.2,
+    rotate_90_cw=True,
+    context_id="view_mode_buttons",
+    context_status=False,    # starts hidden; revealed by View Mode button
+)
+gui_batched.add_text_button(
+    texture_name="button",
+    position=(0.85, 0.21),
+    scale=(0.15, 0.05),
+    click_function=set_view_heightmap,
+    text="Heightmap",
+    font_size=0.2,
+    rotate_90_cw=True,
+    context_id="view_mode_buttons",
+    context_status=False,    # starts hidden; revealed by View Mode button
 )
 
-# must call as final setup of GUI
-gui.build_elements_list()
+# Biome key overlay — shown only in Biome view mode (starts hidden)
+gui_batched.add_texture_element(
+    texture_id=biome_key_tex,
+    position=(0.72, -0.55),
+    scale=(0.125, 0.21),
+    context_id="biome_key_overlay",
+    context_status=False,
+)
+
+# ========== ATMOSPHERE COLOR SLIDERS ==========
+for i, component_name in enumerate(['R', 'G', 'B']):
+    y_pos = 0.85 - i * 0.10
+    
+    gui_batched.add_text_element(
+        texture_name="button",
+        position=(-0.90, y_pos),
+        scale=(0.08, 0.03),
+        text=f"Atm.{component_name}",
+        font_size=0.16,
+        context_id="atmos_color_sliders",
+        context_status=False,
+    )
+    control_value_elements[f"atmos_color_{component_name.lower()}"] = gui_batched.add_text_element(
+        texture_name="button",
+        position=(-0.32, y_pos),
+        scale=(0.10, 0.03),
+        text=f"{sdf_atmosphere.color[i]:.2f}",
+        font_size=0.16,
+        context_id="atmos_color_sliders",
+        context_status=False,
+    )
+    gui_batched.add_slider(
+        bg_texture_name="slider_background",
+        knob_texture_name="button",
+        position=(-0.60, y_pos),
+        scale=(0.18, 0.025),
+        min_value=0.0,
+        max_value=1.0,
+        value=sdf_atmosphere.color[i],
+        callback=lambda val, comp=i: set_atmosphere_color_component(val, comp),
+        context_id="atmos_color_sliders",
+        context_status=False,
+    )
+
+# ========== OCEAN COLOR SLIDERS ==========
+for i, component_name in enumerate(['R', 'G', 'B']):
+    y_pos = 0.45 - i * 0.10
+    
+    gui_batched.add_text_element(
+        texture_name="button",
+        position=(-0.90, y_pos),
+        scale=(0.08, 0.03),
+        text=f"Oce.{component_name}",
+        font_size=0.16,
+        context_id="ocean_color_sliders",
+        context_status=False,
+    )
+    control_value_elements[f"ocean_color_{component_name.lower()}"] = gui_batched.add_text_element(
+        texture_name="button",
+        position=(-0.32, y_pos),
+        scale=(0.10, 0.03),
+        text=f"{sdf_ocean.color[i]:.2f}",
+        font_size=0.16,
+        context_id="ocean_color_sliders",
+        context_status=False,
+    )
+    gui_batched.add_slider(
+        bg_texture_name="slider_background",
+        knob_texture_name="button",
+        position=(-0.60, y_pos),
+        scale=(0.18, 0.025),
+        min_value=0.0,
+        max_value=1.0,
+        value=sdf_ocean.color[i],
+        callback=lambda val, comp=i: set_ocean_color_component(val, comp),
+        context_id="ocean_color_sliders",
+        context_status=False,
+    )
+
 
 # decouple fps from camera movement with time delta
 time_start = 0
@@ -801,6 +1070,7 @@ def update_planet_lights(shader):
     glUniform3fv(glGetUniformLocation(shader, "planet_axis"), 1, list(PLANET_AXIS))
     glUniform1i(glGetUniformLocation(shader, "view_mode"), VIEW_MODE)
     glUniform1f(glGetUniformLocation(shader, "global_temperature"), GLOBAL_TEMPERATURE)
+    glUniform1f(glGetUniformLocation(shader, "global_rainfall_reduction"), GLOBAL_RAINFALL_REDUCTION)
 
     glUniform3fv(glGetUniformLocation(shader, "point_light.position"), 1, my_plc.get_pos())
 
@@ -810,6 +1080,16 @@ def update_planet_lights(shader):
     glUniform1fv(glGetUniformLocation(shader, "point_light.constant"), 1, my_plc.get_constant())
     glUniform1fv(glGetUniformLocation(shader, "point_light.linear"), 1, my_plc.get_linear())
     glUniform1fv(glGetUniformLocation(shader, "point_light.quadratic"), 1, my_plc.get_quadratic())
+
+    # Bind biome map texture to unit 2 (units 0/1 used by ocean/atmosphere passes)
+    glActiveTexture(GL_TEXTURE2)
+    glBindTexture(GL_TEXTURE_2D, biome_tex)
+    glUniform1i(glGetUniformLocation(shader, "biome_map"), 2)
+    # Bind photo-realistic biome map to unit 3
+    glActiveTexture(GL_TEXTURE3)
+    glBindTexture(GL_TEXTURE_2D, biome_true_tex)
+    glUniform1i(glGetUniformLocation(shader, "biome_true_map"), 3)
+    glActiveTexture(GL_TEXTURE0)
 
 
 def update_lights(shader):
@@ -869,29 +1149,6 @@ line_test = Line(shader_program=shader_line,
                  end=vec3([0.0, 1000.0, 0.0]),
                  projection=projection)
 
-sdf_ocean = SphereTransparent(
-    position=vec3(0.0, 0.0, 0.0),
-    radius=PLANET_RADIUS + .2,
-    color=vec3(0.1, 0.2, 0.6),
-    # color=vec3(0.6, 0.2, 0.1),
-    transparency=0.05,
-    max_depth=1.0,
-    near_plane=NEAR_PLANE,
-    far_plane=DRAW_DISTANCE,
-)
-
-sdf_atmosphere = Atmosphere(
-    position=vec3(0.0, 0.0, 0.0),
-    # radius=PLANET_RADIUS * 1.05,
-    radius=PLANET_RADIUS * 1.03,
-    color=vec3(0.53, 0.81, 0.98),
-    transparency=0.0,
-    min_depth=0.0,
-    # max_depth=PLANET_RADIUS * 0.80,
-    max_depth=PLANET_RADIUS * 0.40,
-    near_plane=NEAR_PLANE,
-    far_plane=DRAW_DISTANCE,
-)
 
 # ---- Offscreen FBO used only for the Earth ocean post-process ----------
 # The SDF ocean shader needs scene colour + depth as textures so it can
@@ -1002,6 +1259,12 @@ while not glfw.window_should_close(window):
 
     view = active_camera.get_view_matrix()
 
+    if use_sim_cam and DRAW_GUI:
+        gui_batched.update(
+            mouse_pos_pixels=glfw.get_cursor_pos(window),
+            left_click=(glfw.get_mouse_button(window, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS),
+        )
+
     is_earth = planet_settings.get('planet_type', '') == 'Earth'
 
     if is_earth:
@@ -1013,6 +1276,12 @@ while not glfw.window_should_close(window):
         # Pass 2: Composite ocean over scene -> ocean FBO
         glBindFramebuffer(GL_FRAMEBUFFER, ocean_fbo)
         glClear(GL_COLOR_BUFFER_BIT)
+        
+        # Set ocean transparency to 0 in Biome or Biome True view modes
+        ocean_transparency_backup = sdf_ocean.transparency
+        if VIEW_MODE == 4 or VIEW_MODE == 5:
+            sdf_ocean.transparency = 0.0
+        
         sdf_ocean.draw(
             view=view,
             projection=projection,
@@ -1021,6 +1290,9 @@ while not glfw.window_should_close(window):
             scene_color_texture=scene_color_tex,
             screen_size=(WIDTH, HEIGHT),
         )
+        
+        # Restore ocean transparency
+        sdf_ocean.transparency = ocean_transparency_backup
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
         # Pass 3: Composite atmosphere over ocean result -> default framebuffer
@@ -1043,7 +1315,7 @@ while not glfw.window_should_close(window):
 
 
     if use_sim_cam and DRAW_GUI:
-        gui.draw()
+        gui_batched.draw()
 
     if WRITE_TO_GIF:
         write_fbo_to_gif(width=WIDTH, height=HEIGHT)

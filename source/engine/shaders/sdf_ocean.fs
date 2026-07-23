@@ -128,8 +128,10 @@ void main()
     float light_val = ambient + diff;
 
     // ---- colour blending based on depth ------------------------------
-    vec3 deep_color    = vec3(0.01, 0.05, 0.35);
-    vec3 shallow_color = vec3(0.15, 0.55, 0.80);
+    // Use the uniform sphere_color as the shallow water colour
+    // Darken it by 60% for the deep water colour
+    vec3 shallow_color = sphere_color;
+    vec3 deep_color    = sphere_color * 0.4;
 
     float depth_t      = clamp(water_depth / max_depth, 0.0, 1.0);
     float depth_curved = pow(depth_t, 0.35);

@@ -1,34 +1,5 @@
 """
-started: April 19th, 2024
-update: April 19th, 2024
-
-goals:
-    -[V]render quad on screen
-    -[V]textured quad
-    -[V]control scale and position
-    -[V]transparent textures
-    -[V]texture atlasing
-    -[V]Multiple GUI Elements
-        -static elements.icons
-            -displays, ie, not buttons
-        -want GUI class that holds several GUI elements
-            instantiate GUI class
-            add element to class
-            GUI.draw
-                -draws all elements
-                    -separate draw calls for now
-                        -so just a loop
-
-    -[V]buttons
-        -subclass existing gui element class
-        -[V]Check if mouse is inside button
-        -[V]Check if mouse is clicked
-        -[V]button to spawn ships
-            -ie, tie button into application
-    -[V]Change texture on mouse hover (hover events)
-        -send mouse position into draw
-            -allow each element to figure itself out
-    -[V]activate/deactivate button by clicking other buttons
+GUI System for rendering 2D elements on top of the 3D scene, and for handling mouse interaction with those elements.
 """
 import gc
 import math
@@ -105,18 +76,6 @@ void main()
 }
 """
 
-#create default shaders and textures
-# shader_default = compileProgram(
-#     compileShader(
-#         vertex_src,
-#         GL_VERTEX_SHADER
-#     ),
-#     compileShader(
-#         fragment_src,
-#         GL_FRAGMENT_SHADER
-#     ),
-# )
-
 
 class GUI:
     """
@@ -129,6 +88,7 @@ class GUI:
         self.screen_size = screen_size
         self.elements = []
         self.buttons = []
+        self.sliders = []
         self.context_id_to_status = {}
         self.context_id_to_element = {}
 
@@ -155,6 +115,7 @@ class GUI:
         )
         self.elements.append(element)
         self.update_context_maps(element=element, status=context_status)
+        return element
 
     def add_text_element(
             self,
@@ -190,12 +151,60 @@ class GUI:
         )
         self.elements.append(element)
         self.update_context_maps(element=element, status=context_status)
+        return element
 
 
     def draw(self):
         #TODO: draw all elements at once! (batch rendering)
-        for element in self.elements + self.buttons:
+        for element in self.elements + self.buttons + self.sliders:
             element.draw()
+
+    def add_slider(
+        self,
+        background_texture,
+        slider_texture,
+        position=(0.0, 0.0),
+        scale=(0.5, 0.05),
+        min_value=0.0,
+        max_value=1.0,
+        value=0.0,
+        orientation='horizontal',
+        knob_scale=None,
+        click_function=None,
+        context_id='default',
+        context_status=True,
+        background_color=(1.0, 1.0, 1.0, 1.0),
+        slider_color=(1.0, 1.0, 1.0, 1.0),
+        background_atlas_size=1,
+        background_atlas_coordinate=0,
+        slider_atlas_size=1,
+        slider_atlas_coordinate=0,
+        **click_function_kwargs,
+    ):
+        slider = Slider(
+            background_texture=background_texture,
+            slider_texture=slider_texture,
+            position=position,
+            scale=scale,
+            screen_size=self.screen_size,
+            min_value=min_value,
+            max_value=max_value,
+            value=value,
+            orientation=orientation,
+            knob_scale=knob_scale,
+            click_function=click_function,
+            context_id=context_id,
+            background_color=glm.vec4(background_color),
+            slider_color=glm.vec4(slider_color),
+            background_atlas_size=background_atlas_size,
+            background_atlas_coordinate=background_atlas_coordinate,
+            slider_atlas_size=slider_atlas_size,
+            slider_atlas_coordinate=slider_atlas_coordinate,
+            click_function_kwargs=click_function_kwargs,
+        )
+        self.sliders.append(slider)
+        self.update_context_maps(element=slider, status=context_status)
+        return slider
 
     def add_button(
         self,
@@ -228,6 +237,7 @@ class GUI:
         )
         self.buttons.append(button)
         self.update_context_maps(element=button, status=context_status)
+        return button
 
     def add_text_button(
         self,
@@ -270,6 +280,7 @@ class GUI:
         )
         self.buttons.append(button)
         self.update_context_maps(element=button, status=context_status)
+        return button
 
 
     def button_update(self, position_mouse, left_click, right_click):
@@ -290,6 +301,20 @@ class GUI:
         for button in self.buttons:
             button.update(position_mouse=position_mouse_normalized, left_click=left_click, right_click=right_click)
 
+    def slider_update(self, position_mouse, left_click, right_click):
+        """
+        update sliders continuously (supports click-and-drag behavior)
+        """
+        position_mouse_normalized = glm.vec2(
+            (
+                position_mouse[0] / self.screen_size[0],
+                position_mouse[1] / self.screen_size[1]
+            )
+        )
+
+        for slider in self.sliders:
+            slider.update(position_mouse=position_mouse_normalized, left_click=left_click, right_click=right_click)
+
     def set_screen_size(self, screen_size):
         self.screen_size = screen_size
     def update_context_maps(self, element, status=True):
@@ -303,11 +328,16 @@ class GUI:
     def build_elements_list(self):
         self.elements = []
         self.buttons = []
+        self.sliders = []
         for context_id, status in self.context_id_to_status.items():
             if status:
                 elements = self.context_id_to_element[context_id]
                 for element in elements:
-                    if type(element) == Element:
+                    if isinstance(element, Slider):
+                        self.sliders.append(element)
+                    elif isinstance(element, Button):
+                        self.buttons.append(element)
+                    elif isinstance(element, Element):
                         self.elements.append(element)
                     else:
                         self.buttons.append(element)
@@ -645,6 +675,155 @@ class Button(Element):
             # self.clean_up()
             # self.buffer_setup()
             self.replace_vertices()
+
+
+class Slider:
+    """
+    A draggable GUI slider composed of a background track and a knob.
+    """
+
+    def __init__(
+        self,
+        background_texture,
+        slider_texture,
+        position=(0.0, 0.0),
+        scale=(0.5, 0.05),
+        screen_size=(800, 400),
+        min_value=0.0,
+        max_value=1.0,
+        value=0.0,
+        orientation='horizontal',
+        knob_scale=None,
+        click_function=None,
+        context_id='default',
+        background_color=(1.0, 1.0, 1.0, 1.0),
+        slider_color=(1.0, 1.0, 1.0, 1.0),
+        background_atlas_size=1,
+        background_atlas_coordinate=0,
+        slider_atlas_size=1,
+        slider_atlas_coordinate=0,
+        click_function_kwargs=None,
+    ):
+        self.position = glm.vec2(position)
+        self.scale = glm.vec2(scale)
+        self.screen_size = screen_size
+        self.context_id = context_id
+        self.orientation = orientation.lower()
+        if self.orientation not in {'horizontal', 'vertical'}:
+            raise ValueError("Slider orientation must be 'horizontal' or 'vertical'.")
+
+        self.min_value = float(min_value)
+        self.max_value = float(max_value)
+        if self.max_value <= self.min_value:
+            raise ValueError("Slider max_value must be greater than min_value.")
+
+        self.click_function = click_function
+        self.click_function_kwargs = click_function_kwargs
+        self.is_dragging = False
+
+        if knob_scale is None:
+            if self.orientation == 'horizontal':
+                knob_scale = (max(self.scale.y * 0.60, 0.015), max(self.scale.y * 1.20, 0.02))
+            else:
+                knob_scale = (max(self.scale.x * 1.20, 0.02), max(self.scale.x * 0.60, 0.015))
+
+        self.background = Element(
+            texture=background_texture,
+            position=(self.position.x, self.position.y),
+            scale=(self.scale.x, self.scale.y),
+            screen_size=screen_size,
+            atlas_size=background_atlas_size,
+            atlas_coordinate=background_atlas_coordinate,
+            context_id=context_id,
+            color=glm.vec4(background_color),
+        )
+
+        self.knob = Element(
+            texture=slider_texture,
+            position=(self.position.x, self.position.y),
+            scale=knob_scale,
+            screen_size=screen_size,
+            atlas_size=slider_atlas_size,
+            atlas_coordinate=slider_atlas_coordinate,
+            context_id=context_id,
+            color=glm.vec4(slider_color),
+        )
+
+        self.value = self._clamp_value(value)
+        self._sync_knob_to_value()
+
+    def _clamp_value(self, value):
+        return max(self.min_value, min(self.max_value, float(value)))
+
+    def _value_to_t(self, value):
+        return (value - self.min_value) / (self.max_value - self.min_value)
+
+    def _t_to_value(self, t):
+        return self.min_value + (self.max_value - self.min_value) * t
+
+    def _normalized_mouse_to_ndc(self, position_mouse):
+        return glm.vec2(position_mouse.x * 2.0 - 1.0, 1.0 - position_mouse.y * 2.0)
+
+    def _sync_knob_to_value(self):
+        t = self._value_to_t(self.value)
+        if self.orientation == 'horizontal':
+            x_min = self.position.x - self.scale.x
+            x_max = self.position.x + self.scale.x
+            self.knob.position = glm.vec2(x_min + (x_max - x_min) * t, self.position.y)
+        else:
+            y_min = self.position.y - self.scale.y
+            y_max = self.position.y + self.scale.y
+            self.knob.position = glm.vec2(self.position.x, y_min + (y_max - y_min) * t)
+        self.knob.vertices = self.knob.generate_vertices()
+        self.knob.replace_vertices()
+
+    def _set_value_from_mouse(self, mouse_ndc):
+        if self.orientation == 'horizontal':
+            x_min = self.position.x - self.scale.x
+            x_max = self.position.x + self.scale.x
+            axis = min(x_max, max(x_min, mouse_ndc.x))
+            t = 0.0 if x_max == x_min else (axis - x_min) / (x_max - x_min)
+        else:
+            y_min = self.position.y - self.scale.y
+            y_max = self.position.y + self.scale.y
+            axis = min(y_max, max(y_min, mouse_ndc.y))
+            t = 0.0 if y_max == y_min else (axis - y_min) / (y_max - y_min)
+
+        new_value = self._clamp_value(self._t_to_value(t))
+        if abs(new_value - self.value) > 1e-8:
+            self.value = new_value
+            self._sync_knob_to_value()
+            if self.click_function:
+                if self.click_function_kwargs:
+                    self.click_function(self.value, *list(self.click_function_kwargs.values()))
+                else:
+                    self.click_function(self.value)
+
+    def _point_in_element(self, point_ndc, element):
+        left = element.position.x - element.scale[0]
+        right = element.position.x + element.scale[0]
+        bottom = element.position.y - element.scale[1]
+        top = element.position.y + element.scale[1]
+        return left <= point_ndc.x <= right and bottom <= point_ndc.y <= top
+
+    def update(self, position_mouse, left_click=False, right_click=False):
+        mouse_ndc = self._normalized_mouse_to_ndc(position_mouse)
+        hovering_knob = self._point_in_element(mouse_ndc, self.knob)
+        hovering_track = self._point_in_element(mouse_ndc, self.background)
+
+        if left_click and not self.is_dragging and (hovering_knob or hovering_track):
+            self.is_dragging = True
+            self._set_value_from_mouse(mouse_ndc)
+
+        if self.is_dragging and left_click:
+            self._set_value_from_mouse(mouse_ndc)
+
+        if not left_click:
+            self.is_dragging = False
+
+    def draw(self):
+        self.background.draw()
+        self.knob.draw()
 
 
 class Character(Element):

@@ -260,11 +260,14 @@ textures = glGenTextures(12)
 load_texture("engine/textures/button_atlas_gradient.png", textures[0])
 load_texture("engine/fonts/my_font.png", textures[1])
 load_texture("engine/textures/banana.png", textures[2])
+load_texture("engine/textures/dirt.jpg", textures[3])
 
 texture_dictionary = {
     "button_atlas": textures[0],
     "font_atlas": textures[1],
     "banana": textures[2],
+    "slider_background": textures[0],
+    "slider_knob": textures[3],
 }
 
 """Shader Compilation"""
@@ -295,6 +298,8 @@ planet_settings = {
     "displacement_amplitude": 10.0,
     "planet_type": "Earth"
 }
+
+planet_settings["frequency"] = max(0.0, min(0.05, planet_settings["frequency"]))
 
 def next_seed():
     global planet_settings
@@ -354,6 +359,13 @@ def change_planet_setting(delta=0.05, setting="lacunarity"):
     global planet_settings
     planet_settings[setting] = delta + planet_settings[setting]
     print(f"Changed {setting} to {planet_settings[setting]:.3f}")
+
+
+def set_frequency_from_slider(value):
+    global planet_settings, planet
+    clamped = max(0.0, min(0.05, float(value)))
+    planet_settings["frequency"] = clamped
+    planet.frequency = clamped
 
 gui.add_text_button(
     font_texture=texture_dictionary["font_atlas"],
@@ -504,6 +516,21 @@ gui.add_text_button(
     click_function=change_planet_setting,
     delta = -0.01,
     setting = "frequency",
+)
+
+gui.add_slider(
+    background_texture=texture_dictionary["slider_background"],
+    slider_texture=texture_dictionary["slider_knob"],
+    position=(-0.25, 0.65),
+    scale=(0.20, 0.03),
+    min_value=0.0,
+    max_value=0.05,
+    value=planet_settings["frequency"],
+    orientation='horizontal',
+    click_function=set_frequency_from_slider,
+    context_id="button_1",
+    background_atlas_size=2,
+    background_atlas_coordinate=0,
 )
 gui.add_text_button(
     font_texture=texture_dictionary["font_atlas"],
@@ -909,6 +936,13 @@ while not glfw.window_should_close(window):
 
 
     view = active_camera.get_view_matrix()
+
+    if DRAW_GUI:
+        gui.slider_update(
+            position_mouse=glfw.get_cursor_pos(window),
+            left_click=(glfw.get_mouse_button(window, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS),
+            right_click=(glfw.get_mouse_button(window, glfw.MOUSE_BUTTON_RIGHT) == glfw.PRESS),
+        )
 
     demo_triangle.draw(view_matrix=view)
     demo_cube.draw(view_matrix=view)

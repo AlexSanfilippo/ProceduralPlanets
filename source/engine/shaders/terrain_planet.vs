@@ -21,7 +21,7 @@ uniform vec3 planet_axis;
 out vec3 normal;
 out vec3 frag_pos;
 out float tilt;
-out float hydrosphere;
+out float rainfall;
 out float latitude;
 
 /* cheap 3D hash -> [0,1) */
@@ -82,7 +82,7 @@ float fbm_noise(vec3 p, int octs, float lac, float g, float amp, float freq, flo
     // At high value the raw value dominates, preserving noisy peaks.
     float sig = 1.0 / (1.0 + exp(-value * 5.0));
     float t = clamp(value, 0.0, 1.0);
-    return mix(sig, value, t) - 0.25f;
+    return mix(sig, value, t) - 0.25;
 }
 
 
@@ -157,8 +157,8 @@ void main()
     // compute fbm noise at the vertex's world position (planet centered at origin)
     float n = fbm_noise(worldPos, octaves, lacunarity, gain, amplitude, frequency, seed);
 
-    // Secondary noise layer with offset seed for hydrosphere
-    hydrosphere = fbm_noise(worldPos, octaves, lacunarity, gain, amplitude, frequency*2, seed + 10.0) * 0.5 + 0.5;
+    // Secondary noise layer with offset seed for rainfall
+    rainfall = fbm_noise(worldPos, octaves, lacunarity, gain, amplitude, frequency*2, seed + 10.0) * 0.5 + 0.5;
 
     vec3 displaced = worldPos + worldNormal * n;
     normal = worldNormal;
